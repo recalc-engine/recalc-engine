@@ -1,0 +1,48 @@
+# Build configuration for the `recalc` Python extension (the PyO3 binding in
+# `xl-ffi`). maturin is the build backend ONLY — it is external build/packaging
+# tooling and never a Cargo dependency (pyo3-approval condition 5).
+#
+# Build a wheel:      maturin build --release --features python
+# Dev install (venv): maturin develop --features python
+#
+# maturin passes `--features python` through to Cargo, which enables the
+# optional pyo3 dependency; the default `cargo build --workspace` still links
+# zero pyo3.
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+# Distribution name is `recalc-engine` (one install story across PyPI/npm/
+# crates.io — the contract review naming decision, 2026-07-20); the IMPORTED module stays
+# `recalc` (the shipped `#[pymodule] fn recalc`), set via `tool.maturin.
+# module-name` below. Dist-name != import-name is standard PyPI practice.
+[project]
+name = "recalc-engine"
+description = "Headless, bug-for-bug Excel-compatible spreadsheet recalculation engine (Python binding; import `recalc`)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "pavelruzicka" }]
+keywords = ["excel", "xlsx", "spreadsheet", "formula", "recalculation"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Office/Business :: Financial :: Spreadsheet",
+    "Development Status :: 4 - Beta",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/recalc-engine/recalc-engine"
+Repository = "https://github.com/recalc-engine/recalc-engine"
+
+[tool.maturin]
+# The crate lives in this directory; its lib name is `xl_ffi` but the imported
+# Python module is `recalc` (the `#[pymodule] fn recalc`), so name it here.
+manifest-path = "Cargo.toml"
+module-name = "recalc"
+# Build the abi3 extension via the `python` feature (which turns on pyo3 with
+# abi3-py310 + extension-module + macros). Pure Rust extension — no additional
+# pure-Python source tree, so `python-source` is intentionally unset.
+features = ["python"]

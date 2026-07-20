@@ -1,0 +1,24 @@
+[package]
+name = "recalc-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+# The one public, user-facing crate in the set — this is the crate consumers
+# `cargo add`. It is the only member (besides the internal xl-* crates it
+# re-exports) opted in to publishing.
+publish = true
+description = "Headless, bug-for-bug Excel-compatible spreadsheet recalculation engine: open .xlsx/.xlsm, build the formula dependency graph, and recalculate exactly as Excel would. Public Rust entry point (facade over the internal xl-* crates)."
+readme = "README.md"
+keywords = ["excel", "xlsx", "spreadsheet", "formula", "recalculation"]
+categories = ["parser-implementations", "mathematics"]
+
+[dependencies]
+# The facade re-exports these two crates' public surfaces; a consumer depends
+# on `recalc-engine` alone. crates.io rejects path-only deps, so these carry an
+# exact version — the whole set publishes at 0.1.0 in lockstep.
+xl-io = { path = "../xl-io", version = "0.1.0" }
+xl-engine = { path = "../xl-engine", version = "0.1.0" }

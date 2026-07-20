@@ -1,0 +1,15 @@
+[package]
+name = "xl-ast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = true
+description = "Internal crate of the Recalc engine — depend on recalc-engine."
+
+[dependencies]
+xl-value = { path = "../xl-value", version = "0.1.0" }
+
+[dev-dependencies]
+proptest = { workspace = true }

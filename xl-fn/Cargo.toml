@@ -1,0 +1,25 @@
+[package]
+name = "xl-fn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = true
+description = "Internal crate of the Recalc engine — depend on recalc-engine."
+
+[dependencies]
+# Workspace-internal lanes only (no external crates — the zero-dependency rule
+# in the Recalc design rules applies). `xl-value` is the frozen value/coercion contract;
+# `xl-ast` supplies the operator enums so the scalar operators reuse the parser's
+# own `BinaryOp`/`UnaryOp`/`PostfixOp` rather than duplicating them.
+xl-value = { path = "../xl-value", version = "0.1.0" }
+xl-ast = { path = "../xl-ast", version = "0.1.0" }
+
+[dev-dependencies]
+# Tests only: `test-util` exposes `Value::test_lambda()` for the lookup-family
+# BC-6 lambda-refusal regression tests. The new-resolver keeps dev-dependency
+# features out of the normal `cargo build`, so `test_lambda` never leaks into a
+# production build (verified: `Value::test_lambda` is `#[cfg(any(test,
+# feature = "test-util"))]`).
+xl-value = { path = "../xl-value", version = "0.1.0", features = ["test-util"] }

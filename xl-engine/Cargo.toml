@@ -1,0 +1,37 @@
+[package]
+name = "xl-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = true
+description = "Internal crate of the Recalc engine — depend on recalc-engine."
+
+[features]
+# M2 lane 9 (RFC-0014): parallel recalc. NON-default — the default
+# `cargo build --workspace` stays serial and compiles zero rayon code
+# (the `rayon` dependency policy, condition 2). The parallel path is
+# bit-identical to serial by construction: a pure `par_iter` map over each
+# antichain wave, then a serial apply in canonical plan order (no
+# nondeterministic-order float fold exists — condition 3). CI asserts the two
+# paths agree cell-for-cell (condition 4). The wasm build must NEVER enable
+# this (condition 6) — enforced by the `compile_error!` guard in `lib.rs`.
+default = []
+parallel = ["dep:rayon"]
+
+[dependencies]
+# Workspace-internal lanes only (no external crates — the zero-dependency rule
+# in the Recalc design rules applies). The engine is the one crate that depends on all of the
+# others: it loads (xl-io), parses (xl-ast), schedules (xl-graph), evaluates
+# (xl-fn), over the frozen value model (xl-value).
+xl-value = { path = "../xl-value", version = "0.1.0" }
+xl-io = { path = "../xl-io", version = "0.1.0" }
+xl-ast = { path = "../xl-ast", version = "0.1.0" }
+xl-graph = { path = "../xl-graph", version = "0.1.0" }
+xl-fn = { path = "../xl-fn", version = "0.1.0" }
+
+# M2 lane 9 — parallel recalc, gated behind the non-default `parallel` feature
+# above. Exact pin per the the `rayon` dependency policy (2026-07-14); no rayon
+# features enabled (its only optional feature, `web_spin_lock`, is forbidden).
+rayon = { version = "=1.12.0", optional = true }

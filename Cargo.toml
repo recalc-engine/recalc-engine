@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "xl-io",
+    "xl-ast",
+    "xl-value",
+    "xl-graph",
+    "xl-fn",
+    "xl-engine",
+    "recalc-engine",
+    "xl-ffi",
+    "xl-bench",
+]
+
+[workspace.dependencies]
+# Dev-only property-testing framework (used from the `[dev-dependencies]` of
+# xl-value and xl-io). Most runtime crates carry zero external dependencies.
+proptest = "1.11"
+
+# Runtime dependencies for `xl-io` ONLY. `zip` reads/writes the OOXML package
+# container; default features are disabled and only `deflate` is enabled, since
+# xlsx parts are Stored or Deflate-compressed (never AES-encrypted, bzip2,
+# lzma/xz, ppmd, or zstd) — this drops the `time` crate and every other
+# optional codec dependency. `quick-xml` parses the XML parts; it has no
+# default features to disable.
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.96"
+repository = "https://github.com/recalc-engine/recalc-engine"
+homepage = "https://github.com/recalc-engine/recalc-engine"
+authors = ["pavelruzicka"]
+# Default: crates are NOT publishable. The crates.io publish set opts in
+# individually with an explicit `publish = true` (the six internal xl-* crates
+# plus the `recalc-engine` facade). `xl-ffi` and `xl-bench` inherit this
+# `false` and stay unpublished.
+publish = false

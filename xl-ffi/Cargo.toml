@@ -1,0 +1,107 @@
+[package]
+name = "xl-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Thin, versioned foreign bindings for Recalc. Ships a PyO3 Python binding (module `recalc`), a napi-rs Node binding, and a wasm-bindgen WASM binding, each behind an off-by-default feature (`python` / `node` / `wasm`); the C ABI stays documentation-only (RFC-0013 BC-8)."
+
+# Every binding builds a loadable `cdylib` (the Python `.so`/`.pyd`, the Node
+# `.node` addon, the WASM module); `rlib` is kept so the crate's pure-Rust
+# items (e.g. the A1 parser) stay usable as an ordinary library and testable by
+# `cargo test --workspace`.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Core engine wrapped by the bindings. These are pure-Rust, zero-external-dep
+# crates; none of them depends on pyo3 (CI asserts this — see
+# `tools/check-no-pyo3-in-core.py`).
+xl-io = { path = "../xl-io" }
+xl-engine = { path = "../xl-engine" }
+
+# PyO3 — approved for `xl-ffi` ONLY (the dependency-approval policy,
+# 2026-07-11). OPTIONAL and pulled in exclusively by the non-default `python`
+# feature below, so the default `cargo build --workspace` compiles zero pyo3.
+# Pinned to an EXACT version per approval condition 4; `Cargo.lock` committed.
+#
+# Enabled pyo3 features and why (approval condition 3 — abi3-py310 is ratified;
+# the other two are mechanically required to build an abi3 extension module and
+# are flagged for reviewer ratification, see xl-ffi/PYTHON_BINDING.md):
+#   * abi3-py310      — one portable wheel targeting the CPython 3.10+ stable
+#                       ABI (the ratified feature).
+#   * extension-module — do not link libpython; required to build a loadable
+#                       Python extension (and to keep the default `cargo build`
+#                       of the cdylib from needing a Python library to link).
+#   * macros          — the `#[pymodule]`/`#[pyclass]`/`#[pyfunction]` derive
+#                       macros the binding is written with. (This is a pyo3
+#                       *default* feature; named explicitly for the audit trail.)
+pyo3 = { version = "=0.29.0", optional = true, default-features = false, features = [
+    "abi3-py310",
+    "extension-module",
+    "macros",
+] }
+
+# napi-rs — Node binding, approved for `xl-ffi` ONLY (the Recalc design rules
+# dependency-approval log, 2026-07-14 approve-with-conditions + the
+# feature/pin ratification entry). OPTIONAL and pulled in exclusively by the
+# non-default `node` feature below, so the default `cargo build --workspace`
+# links zero napi. EXACT pins per the ratification; `Cargo.lock` committed.
+#
+# Feature set is the ratified minimal, enumerated list (all under
+# `default-features = false`):
+#   * napi        — features ["napi4","dyn-symbols"]. `napi4` is the lowest
+#                   N-API STABLE-ABI level with threadsafe functions (one
+#                   portable addon per platform, any Node >= 10.16);
+#                   `dyn-symbols` resolves N-API symbols at load time. NOT
+#                   enabled: `async`/every `tokio_*` (condition 9), serde,
+#                   compat-mode, napi5..napi10, full.
+#   * napi-derive — features ["type-def","strict"]: the `#[napi]` derives plus
+#                   the `.d.ts` metadata `@napi-rs/cli` consumes, and
+#                   diagnostics-only `strict`.
+napi = { version = "=3.10.5", optional = true, default-features = false, features = [
+    "napi4",
+    "dyn-symbols",
+] }
+napi-derive = { version = "=3.5.10", optional = true, default-features = false, features = [
+    "type-def",
+    "strict",
+] }
+
+# wasm-bindgen — WASM binding, approved for `xl-ffi` ONLY (the Recalc design rules
+# dependency-approval log, 2026-07-14 approve-with-conditions + the
+# feature/pin ratification entry). OPTIONAL and pulled in exclusively by the
+# non-default `wasm` feature below. EXACT pin; `Cargo.lock` committed. The
+# external `wasm-bindgen-cli` MUST equal this pin (condition 3).
+#
+# `std` is the crate's entire default feature set in 0.2.126, named explicitly.
+# NOT enabled: serde/serde-serialize, enable-interning, spans, gg-alloc, etc.
+# The wasm build stays single-threaded — it MUST NEVER enable any parallel/
+# rayon feature (wasm-bindgen condition 4) — and exposes no JS-callback/fetch
+# surface into the engine.
+wasm-bindgen = { version = "=0.2.126", optional = true, default-features = false, features = [
+    "std",
+] }
+
+# napi-build — Node addon build helper (build-dependency, `xl-ffi` only),
+# approved by name in the 2026-07-14 napi-rs ratification. OPTIONAL and enabled
+# only by the `node` feature; emits the platform link args the `.node`
+# cdylib needs (e.g. macOS `-undefined dynamic_lookup`). Zero features, zero
+# deps; it is build/packaging tooling, never linked into the artifact.
+[build-dependencies]
+napi-build = { version = "=2.3.2", optional = true }
+
+[features]
+# Off by default: `cargo build --workspace` (no `--features`) links ZERO
+# binding deps (no pyo3, no napi, no wasm-bindgen). Each binding is turned on
+# by its own non-default feature; they are mutually independent and the crate
+# compiles under any one alone and under `--all-features`.
+#
+# `cargo build -p xl-ffi --features python` (or `maturin develop`) → Python.
+python = ["dep:pyo3"]
+# `cargo build -p xl-ffi --features node` → Node addon (napi-rs).
+node = ["dep:napi", "dep:napi-derive", "dep:napi-build"]
+# `cargo build -p xl-ffi --features wasm` → WASM module (wasm-bindgen).
+wasm = ["dep:wasm-bindgen"]

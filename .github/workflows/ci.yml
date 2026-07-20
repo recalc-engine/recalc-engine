@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: cargo build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+      - name: cargo build --workspace
+        run: cargo build --workspace --locked
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+      # The bindings are non-default features, so the workspace build above never
+      # compiles their value-marshal paths. Compile each explicitly so a new
+      # `Value` variant breaks the FFI marshal here rather than shipping a silent
+      # gap. abi3-py310 + extension-module means no libpython link is needed.
+      - name: cargo check xl-ffi (python binding)
+        run: cargo check -p xl-ffi --features python --locked
+      - name: cargo check xl-ffi (node binding)
+        run: cargo check -p xl-ffi --features node --locked
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - name: cargo check xl-ffi (wasm binding)
+        run: cargo check -p xl-ffi --features wasm --locked --target wasm32-unknown-unknown
+      # The wasm binding must never pull rayon: it is single-threaded, no-network,
+      # no-threads by construction. A `compile_error!` guard in xl-engine is the
+      # compile-time half; this asserts the wasm dependency tree carries no rayon.
+      - name: Assert the wasm build has no rayon
+        run: |
+          cargo tree -p xl-ffi --features wasm --target wasm32-unknown-unknown --locked > wasm-tree.txt
+          if grep -qw rayon wasm-tree.txt; then
+            echo "ERROR: rayon appears in the wasm dependency tree (parallel must never reach wasm)"
+            exit 1
+          fi
+          echo "OK: no rayon in the wasm build"
+
+  deps-guard:
+    name: dependency isolation guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-depsguard-${{ hashFiles('**/Cargo.lock') }}
+      # The binding deps (pyo3 / napi / wasm-bindgen) stay confined to xl-ffi;
+      # no core crate may reach them, directly or transitively.
+      - name: Assert binding deps stay in their owning crate
+        run: python3 tools/check-no-pyo3-in-core.py
+      # The load-bearing coercion/order/marshal helpers must enumerate `Value`
+      # variants explicitly (no bare `_ =>`), so the next `Value` variant breaks
+      # the build there instead of being silently absorbed.
+      - name: Assert no bare Value wildcard in load-bearing fns
+        run: python3 tools/check-no-value-wildcard.py

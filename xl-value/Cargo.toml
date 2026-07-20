@@ -1,0 +1,24 @@
+[package]
+name = "xl-value"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = true
+description = "Internal crate of the Recalc engine — depend on recalc-engine."
+
+[dependencies]
+
+[features]
+# Test-only helper surface: a dummy `LambdaObj` impl + a `Value::Lambda`
+# constructor (`Value::test_lambda` / `Lambda::new_for_test`) for exercising
+# the born-refusing arms from this crate AND downstream crates' tests. NOT part
+# of the production API — no production code constructs a `Value::Lambda`
+# (RFC-0012 BC-6, "born refusing"). Never enabled by default, so
+# `cargo build --workspace` compiles zero lambda constructors; downstream
+# crates opt in from their `[dev-dependencies]` only.
+test-util = []
+
+[dev-dependencies]
+proptest = { workspace = true }

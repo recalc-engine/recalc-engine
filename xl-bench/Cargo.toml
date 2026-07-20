@@ -1,0 +1,49 @@
+[package]
+name = "xl-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Conformance harness + corpus runner for Recalc (ExcelBench). Harness is Apache-2.0; oracle corpus/results are partly PROPRIETARY — see README."
+
+[features]
+# Feature wiring ONLY (no new dependency — the zero-dependency rule): forwards to
+# `xl-engine/parallel` so a `cargo build -p xl-bench --features parallel` builds
+# the `recalc` CLI against the parallel recalc executor. Used exclusively by the
+# serial-vs-parallel corpus sweep (`recalc cell-hash`, `docs/parallel-sweep.md`,
+# the deferred half of the rayon dependency policy, condition 4). NON-default: the plain
+# `cargo build --workspace` stays serial and links zero rayon code, and no
+# released `xl-bench` artifact enables this.
+default = []
+parallel = ["xl-engine/parallel"]
+
+[dependencies]
+# Workspace-internal lanes only (no external crates — the zero-dependency
+# rule in the Recalc design rules applies to this crate too; JSON is hand-written, see
+# `src/json.rs`, rather than pulling in `serde`/`serde_json`).
+xl-value = { path = "../xl-value" }
+xl-io = { path = "../xl-io" }
+xl-engine = { path = "../xl-engine" }
+# Used only by the `tier0` sub-cut (src/tier0.rs) to extract each formula's
+# function vocabulary via the real parser rather than a regex. Internal
+# workspace lane (already an xl-engine transitive dep); not an external crate.
+xl-ast = { path = "../xl-ast" }
+# Used only by the `decline-attribution` sub-cut (src/decline.rs) to detect
+# unimplemented functions via the real registry (`xl_fn::lookup`) rather than a
+# drifting hand-maintained mirror — candor matters for a published number.
+# Internal workspace lane (already an xl-engine transitive dep); not external.
+xl-fn = { path = "../xl-fn" }
+
+[dev-dependencies]
+# Test-only: enables `xl-value`'s `test-util` feature so the diff/sidecar tests
+# can construct a `Value::Lambda` (via `Value::test_lambda`) to assert the
+# born-refusing classification (RFC-0012 BC-6). Feature unification turns this
+# on for `cargo test` only; the normal `cargo build` of this crate's lib/bin
+# links no lambda constructor.
+xl-value = { path = "../xl-value", features = ["test-util"] }
+
+[[bin]]
+name = "recalc"
+path = "src/bin/recalc.rs"
