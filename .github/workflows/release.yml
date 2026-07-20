@@ -1,0 +1,173 @@
+name: Release build matrix
+
+# Builds every shippable artifact for a release: the abi3 Python wheels, the
+# per-platform Node (N-API) addons, and a plain cargo build+test gate. Artifacts
+# are uploaded to the run; publishing to PyPI / npm / crates.io is a deliberate
+# manual step and is intentionally NOT part of this workflow.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Plain cargo build + test (default features: zero binding dependencies).
+  # ---------------------------------------------------------------------------
+  cargo:
+    name: cargo build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: cargo build --workspace
+        run: cargo build --workspace --locked
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  # ---------------------------------------------------------------------------
+  # Python wheels: one portable abi3 (CPython >= 3.10) wheel per platform.
+  # ---------------------------------------------------------------------------
+  wheels:
+    name: wheels ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: universal2-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: xl-ffi
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist --features python
+      - name: List built wheels
+        shell: bash
+        run: ls -la xl-ffi/dist
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: xl-ffi/dist/*.whl
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Node addons (N-API, stable ABI level napi4). One .node per platform triple.
+  # ---------------------------------------------------------------------------
+  napi-linux:
+    name: napi linux (x86_64 + aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain + targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+      - name: Install aarch64 cross linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install @napi-rs/cli
+        working-directory: xl-ffi
+        run: npm install
+      - name: Build x86_64 addon
+        working-directory: xl-ffi
+        run: npx napi build --platform --release --features node --target x86_64-unknown-linux-gnu
+      - name: Build aarch64 addon
+        working-directory: xl-ffi
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: npx napi build --platform --release --features node --target aarch64-unknown-linux-gnu
+      - name: List addons
+        run: ls -la xl-ffi/*.node xl-ffi/index.js xl-ffi/index.d.ts
+      - name: Upload addons
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-linux
+          path: |
+            xl-ffi/*.node
+            xl-ffi/index.js
+            xl-ffi/index.d.ts
+          if-no-files-found: error
+
+  napi-macos:
+    name: napi macOS (arm64 + x86_64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain + targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install @napi-rs/cli
+        working-directory: xl-ffi
+        run: npm install
+      - name: Build arm64 addon
+        working-directory: xl-ffi
+        run: npx napi build --platform --release --features node --target aarch64-apple-darwin
+      - name: Build x86_64 addon
+        working-directory: xl-ffi
+        run: npx napi build --platform --release --features node --target x86_64-apple-darwin
+      - name: List addons
+        run: ls -la xl-ffi/*.node xl-ffi/index.js xl-ffi/index.d.ts
+      - name: Upload addons
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-macos
+          path: |
+            xl-ffi/*.node
+            xl-ffi/index.js
+            xl-ffi/index.d.ts
+          if-no-files-found: error
+
+  napi-windows:
+    name: napi Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain + target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-pc-windows-msvc
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install @napi-rs/cli
+        working-directory: xl-ffi
+        run: npm install
+      - name: Build x86_64 addon
+        working-directory: xl-ffi
+        run: npx napi build --platform --release --features node --target x86_64-pc-windows-msvc
+      - name: List addons
+        shell: bash
+        run: ls -la xl-ffi/*.node xl-ffi/index.js xl-ffi/index.d.ts
+      - name: Upload addons
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-windows
+          path: |
+            xl-ffi/*.node
+            xl-ffi/index.js
+            xl-ffi/index.d.ts
+          if-no-files-found: error

@@ -10,6 +10,10 @@
 /pkg
 xl-ffi/*.abi3.so
 
+# Node tooling
+node_modules/
+package-lock.json
+
 # Python tooling
 __pycache__/
 *.pyc

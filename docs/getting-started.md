@@ -21,23 +21,37 @@ either exactly what Excel computes, or it is loudly flagged.
 
 ## Install
 
-> **State of the world (v0.1.0):** the crates are **not yet published** to
-> crates.io, PyPI, or npm (`publish = false` in the workspace). Today you
-> **build from source**. There is no `pip install recalc` / `npm install recalc`
-> yet — treat any such command as aspirational until the first release.
-
-All bindings live in the `xl-ffi` crate behind **off-by-default** Cargo
-features (`python` / `node` / `wasm`); a plain `cargo build --workspace` links
-*zero* binding dependencies. You turn on exactly one binding per build.
-
-Prerequisites: a Rust toolchain (workspace `rust-version = 1.96`). In this repo
-the Homebrew `rustup` is keg-only, so prefix cargo/rustc commands with:
+Recalc **v0.1.0** ships as a package on all three ecosystems under one name,
+`recalc-engine`:
 
 ```sh
-export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+pip install recalc-engine      # Python (CPython >= 3.10; import name: recalc)
+npm install recalc-engine      # Node.js native addon
+cargo add recalc-engine        # Rust
 ```
 
-### Python (PyO3 → module `recalc`)
+- **Python** — a portable `abi3` wheel targeting CPython 3.10+. The PyPI
+  distribution is `recalc-engine`; the *imported module* is `recalc`
+  (distribution-name ≠ import-name is standard PyPI practice).
+- **Node.js** — a prebuilt N-API addon (stable-ABI level `napi4`), which loads
+  on any Node ≥ 10.16.
+- **Rust** — depend on the `recalc-engine` facade crate, which re-exports the
+  engine's public surface (`xl_io` loaders + the `xl_engine` API).
+
+Prebuilt binaries are published for Linux (x86_64, aarch64), macOS (x86_64 and
+Apple silicon), and Windows (x86_64). On any other platform, `pip`/`npm` fall
+back to building from source, which needs the toolchain below.
+
+### Build from source
+
+All bindings live in the `xl-ffi` crate behind **off-by-default** Cargo features
+(`python` / `node` / `wasm`); a plain `cargo build --workspace` links *zero*
+binding dependencies. You turn on exactly one binding per build.
+
+Prerequisites: a Rust toolchain (workspace `rust-version = 1.96`) — install with
+[rustup](https://rustup.rs/).
+
+#### Python (PyO3 → module `recalc`)
 
 Built with **maturin** (external build tool, never a crate dependency) into a
 single portable `abi3` wheel targeting CPython **3.10+**:
@@ -54,18 +68,21 @@ maturin build --release --features python
 The imported module is `recalc` (from `#[pymodule] fn recalc`). These commands
 are documented in `xl-ffi/pyproject.toml`.
 
-### Node.js (napi-rs → `.node` addon)
+#### Node.js (napi-rs → `.node` addon)
 
 Enabled by the `node` feature; the native addon is produced with the
 **`@napi-rs/cli`** tool (external tooling, never a crate dependency). N-API
 stable-ABI level `napi4`, so one addon per platform loads on any Node ≥ 10.16.
+The `xl-ffi/package.json` carries the napi build config; the build script is
+`napi build --platform --release --features node`.
 
 ```sh
-# builds the .node addon with the `node` feature enabled
-napi build --release --features node   # [verify: exact @napi-rs/cli flags — no package.json is checked in yet]
+cd xl-ffi
+npm install              # installs the pinned @napi-rs/cli
+npm run build            # → recalc-engine.<platform>.node + index.js + index.d.ts
 ```
 
-### WASM (wasm-bindgen)
+#### WASM (wasm-bindgen)
 
 Enabled by the `wasm` feature; the module is produced by **`wasm-bindgen-cli`**
 (pinned to `0.2.126` — the external CLI version must equal the crate pin) or via
@@ -74,18 +91,25 @@ Enabled by the `wasm` feature; the module is produced by **`wasm-bindgen-cli`**
 ```sh
 cargo build -p xl-ffi --release --features wasm --target wasm32-unknown-unknown
 wasm-bindgen --target web target/wasm32-unknown-unknown/release/xl_ffi.wasm --out-dir pkg
-# [verify: exact wasm-bindgen/wasm-pack invocation — no packaging script is checked in yet]
 ```
 
-### Rust (use the crates directly)
+#### Rust (use the crates directly)
 
-There is no separate "binding" for Rust — you depend on the engine crates. Since
-nothing is published yet, use a path or git dependency:
+There is no separate "binding" for Rust — you depend on the engine. The
+published entry point is the `recalc-engine` facade crate:
+
+```sh
+cargo add recalc-engine
+```
+
+It re-exports the `xl_io` loaders and the `xl_engine` API, so a consumer depends
+on `recalc-engine` alone. To build against a local checkout instead, point at
+the crates by path:
 
 ```toml
 [dependencies]
-xl-io     = { path = "path/to/recalc/xl-io" }
-xl-engine = { path = "path/to/recalc/xl-engine" }
+xl-io     = { path = "path/to/recalc-engine/xl-io" }
+xl-engine = { path = "path/to/recalc-engine/xl-engine" }
 ```
 
 ---
