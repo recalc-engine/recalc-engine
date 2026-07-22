@@ -1,0 +1,16 @@
+# Competitor engines for the measurement harness (venv ONLY).
+# These are external Python packages installed on the measurement host;
+# the Cargo workspace zero-dependency rule is untouched (no crate deps added).
+#
+# Pins are exact for reproducible measurement runs. Bump only deliberately and
+# re-record the numbers in docs/competitor-harness.md.
+#
+# LibreOffice is NOT a pip package — install the OS package on the host
+# (`apt-get install libreoffice-calc`); it ships its own bundled Python + UNO,
+# which lo_dump.py runs inside. No python3-uno needed for the macro path.
+
+pycel==1.0b30
+formulas==1.2.10
+
+# pycel/formulas both pull numpy, openpyxl, networkx, etc. transitively; those
+# are their concern, resolved by pip inside the venv.

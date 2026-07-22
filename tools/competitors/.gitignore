@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# Local scratch: engine venvs, per-run JSON, smoke outputs
+.venv/
+venv/
+*-smoke.json
+out/
