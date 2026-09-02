@@ -124,9 +124,9 @@ labelled workstreams.
 
 Compatibility claims are evidence-scoped. Recalc reports whether a value was
 computed, matched a stored value, matched a supplied baseline, or was refused.
-Baseline and supplied-Excel flags are reserved for the typed evidence pipeline
-and are refused by the current CLI. Do not infer pinned-Excel agreement from a
-local cached-value run.
+The current CLI supports stored cached values and a local `--baseline`; the
+`--excel-result` flag remains reserved for the identified-Excel evidence
+pipeline. Do not infer pinned-Excel agreement from a local run.
 
 ## Scope — what it is, and isn't
 
