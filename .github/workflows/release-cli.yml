@@ -495,6 +495,9 @@ jobs:
     env:
       VERSION: ${{ needs.meta.outputs.version }}
     steps:
+      # The GitHub CLI needs a repository context to create the release and to
+      # verify that the tag exists; the release job has no other use for the tree.
+      - uses: actions/checkout@v4
       - name: Download all archives and SHA256SUMS
         uses: actions/download-artifact@v4
         with:
@@ -572,6 +575,7 @@ jobs:
             *-*) flags+=(--prerelease) ;;
           esac
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "recalc CLI v$VERSION" \
             --notes-file notes.md \
