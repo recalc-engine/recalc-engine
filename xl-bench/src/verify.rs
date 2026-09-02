@@ -51,6 +51,102 @@ impl Decision {
     }
 }
 
+/// One finding in a Verify v1 report (`issues[]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Issue {
+    /// Stable machine code (`mismatch`, `unsupported`, `external_reference`, ...).
+    pub code: String,
+    /// `error` (drives FAIL) or `warning` (drives FALLBACK or is informational).
+    pub severity: &'static str,
+    /// Plain-language description.
+    pub message: String,
+    /// Sheet name when the finding is cell-scoped.
+    pub sheet: Option<String>,
+    /// A1 reference when the finding is cell-scoped.
+    pub cell_ref: Option<String>,
+}
+
+impl Issue {
+    fn new(code: impl Into<String>, severity: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            severity,
+            message: message.into(),
+            sheet: None,
+            cell_ref: None,
+        }
+    }
+
+    fn at(mut self, sheet: &str, cell_ref: &str) -> Self {
+        self.sheet = Some(sheet.to_string());
+        self.cell_ref = Some(cell_ref.to_string());
+        self
+    }
+
+    fn to_json(&self) -> String {
+        let mut out = format!(
+            "{{\"code\":{},\"severity\":{},\"message\":{}",
+            crate::json::escape_str(&self.code),
+            crate::json::escape_str(self.severity),
+            crate::json::escape_str(&self.message)
+        );
+        if let (Some(sheet), Some(cell_ref)) = (&self.sheet, &self.cell_ref) {
+            out.push_str(&format!(
+                ",\"sheet\":{},\"ref\":{}",
+                crate::json::escape_str(sheet),
+                crate::json::escape_str(cell_ref)
+            ));
+        }
+        out.push('}');
+        out
+    }
+}
+
+/// A completed Verify v1 run: the canonical JSON report plus the structured
+/// decision and findings the human summary is rendered from.
+#[derive(Clone, Debug)]
+pub struct VerifyRun {
+    /// The `recalc.verify.report/v1` document.
+    pub json: String,
+    /// PASS / FAIL / FALLBACK.
+    pub decision: Decision,
+    /// Every finding, in report order.
+    pub issues: Vec<Issue>,
+    /// Number of formula cells examined.
+    pub formula_cells: usize,
+}
+
+impl VerifyRun {
+    /// Concise human report: decision, counts, then one line per finding.
+    /// It carries no Excel-fidelity claim; evidence labels live in the JSON.
+    #[must_use]
+    pub fn human_report(&self, path: &Path) -> String {
+        let label = match self.decision {
+            Decision::Pass => "PASS",
+            Decision::Fail => "FAIL",
+            Decision::Fallback => "FALLBACK",
+        };
+        let errors = self.issues.iter().filter(|i| i.severity == "error").count();
+        let warnings = self.issues.len() - errors;
+        let mut out = format!(
+            "{label}  {}\n  formula cells: {}; findings: {errors} error, {warnings} warning\n",
+            path.display(),
+            self.formula_cells
+        );
+        for issue in &self.issues {
+            let site = match (&issue.sheet, &issue.cell_ref) {
+                (Some(sheet), Some(cell_ref)) => format!("{sheet}!{cell_ref}  "),
+                _ => String::new(),
+            };
+            out.push_str(&format!(
+                "  {:<7} {site}{}: {}\n",
+                issue.severity, issue.code, issue.message
+            ));
+        }
+        out
+    }
+}
+
 /// Action taken when a safe-but-incomplete condition is encountered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyAction {
@@ -428,6 +524,16 @@ pub fn run_verify_v1(
     policy_path: Option<&Path>,
     baseline_path: Option<&Path>,
 ) -> Result<(String, Decision), String> {
+    verify_workbook(path, policy_path, baseline_path).map(|run| (run.json, run.decision))
+}
+
+/// Run Verify v1 (stored cached values, or an optional local baseline) and
+/// return the structured run for both machine and human consumption.
+pub fn verify_workbook(
+    path: &Path,
+    policy_path: Option<&Path>,
+    baseline_path: Option<&Path>,
+) -> Result<VerifyRun, String> {
     run_verify_internal(path, policy_path, baseline_path, false)
 }
 
@@ -531,7 +637,7 @@ fn run_verify_internal(
     policy_path: Option<&Path>,
     baseline_path: Option<&Path>,
     baseline_cached: bool,
-) -> Result<(String, Decision), String> {
+) -> Result<VerifyRun, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("failed to read workbook: {e}"))?;
     let baseline_bytes = baseline_path
         .map(std::fs::read)
@@ -571,7 +677,7 @@ fn run_verify_internal(
         report.summary.mismatch > 0
     };
     let mut fallback = false;
-    let mut preflight_issues = Vec::new();
+    let mut preflight_issues: Vec<Issue> = Vec::new();
     if policy.require_comparison {
         let has_comparison = baseline_values
             .as_ref()
@@ -581,7 +687,11 @@ fn run_verify_internal(
                 && report.summary.no_oracle < report.summary.total_formula_cells);
         if !has_comparison {
             fallback = true;
-            preflight_issues.push("{\"code\":\"comparison_required\",\"severity\":\"warning\",\"message\":\"policy requires a usable comparison source\"}".to_string());
+            preflight_issues.push(Issue::new(
+                "comparison_required",
+                "warning",
+                "policy requires a usable comparison source",
+            ));
         }
     }
     let external_reference = report
@@ -594,7 +704,11 @@ fn run_verify_internal(
         .any(|c| has_volatile_function(&c.formula));
     if policy.require_determinism && volatile_formula {
         fallback = true;
-        preflight_issues.push("{\"code\":\"determinism_unavailable\",\"severity\":\"warning\",\"message\":\"workbook contains volatile formulas without injected clock or RNG\"}".to_string());
+        preflight_issues.push(Issue::new(
+            "determinism_unavailable",
+            "warning",
+            "workbook contains volatile formulas without injected clock or RNG",
+        ));
     }
     for (condition, action, code, message) in [
         (
@@ -620,39 +734,52 @@ fn run_verify_internal(
                 }
                 PolicyAction::Allow => {}
             }
-            preflight_issues.push(format!(
-                "{{\"code\":{},\"severity\":\"warning\",\"message\":{}}}",
-                crate::json::escape_str(code),
-                crate::json::escape_str(message)
-            ));
+            preflight_issues.push(Issue::new(code, "warning", message));
         }
     }
     if !baseline_missing.is_empty() {
         fallback = true;
-        preflight_issues.push(format!(
-            "{{\"code\":\"baseline_cell_unavailable\",\"severity\":\"warning\",\"message\":{} }}",
-            crate::json::escape_str("baseline lacks one or more candidate formula cells")
+        preflight_issues.push(Issue::new(
+            "baseline_cell_unavailable",
+            "warning",
+            "baseline lacks one or more candidate formula cells",
         ));
     }
     // The stored-value gate applies only when stored cached values are the
     // active comparison source; a baseline run never reads the candidate cache.
     if baseline_path.is_none() && !policy.allow_stored_value_match {
         fallback = true;
-        preflight_issues.push("{\"code\":\"stored_evidence_disabled\",\"severity\":\"warning\",\"message\":\"policy disallows stored cached-value evidence\"}".to_string());
+        preflight_issues.push(Issue::new(
+            "stored_evidence_disabled",
+            "warning",
+            "policy disallows stored cached-value evidence",
+        ));
     }
     if policy.require_excel_result && (!baseline_cached || baseline_path.is_none()) {
         fallback = true;
-        preflight_issues.push("{\"code\":\"excel_evidence_required\",\"severity\":\"warning\",\"message\":\"policy requires a supplied Excel result\"}".to_string());
+        preflight_issues.push(Issue::new(
+            "excel_evidence_required",
+            "warning",
+            "policy requires a supplied Excel result",
+        ));
     }
     if baseline_path.is_some() && !baseline_cached && !policy.allow_baseline_match {
         fallback = true;
-        preflight_issues.push("{\"code\":\"baseline_evidence_disabled\",\"severity\":\"warning\",\"message\":\"policy disallows local baseline evidence\"}".to_string());
+        preflight_issues.push(Issue::new(
+            "baseline_evidence_disabled",
+            "warning",
+            "policy disallows local baseline evidence",
+        ));
     }
     let assertion_failures = match evaluate_assertions(path, &policy.assertions) {
         Ok(failures) => failures,
         Err(message) => {
             fallback = true;
-            preflight_issues.push(format!("{{\"code\":\"assertion_evaluation_failed\",\"severity\":\"warning\",\"message\":{}}}", crate::json::escape_str(&message)));
+            preflight_issues.push(Issue::new(
+                "assertion_evaluation_failed",
+                "warning",
+                message,
+            ));
             Vec::new()
         }
     };
@@ -768,7 +895,14 @@ fn run_verify_internal(
     payload.push_str("\"cells\":[");
     let mut issues = preflight_issues;
     for (sheet, cell_ref, operator) in &assertion_failures {
-        issues.push(format!("{{\"code\":\"assertion_failed\",\"severity\":\"error\",\"message\":{},\"sheet\":{},\"ref\":{}}}", crate::json::escape_str(&format!("assertion {operator} failed")), crate::json::escape_str(sheet), crate::json::escape_str(cell_ref)));
+        issues.push(
+            Issue::new(
+                "assertion_failed",
+                "error",
+                format!("assertion {operator} failed"),
+            )
+            .at(sheet, cell_ref),
+        );
     }
     for (i, c) in report.cells.iter().enumerate() {
         if i > 0 {
@@ -805,25 +939,60 @@ fn run_verify_internal(
         };
         let baseline_key = (c.sheet.clone(), c.row, c.col);
         if baseline_path.is_some() && baseline_mismatches.contains(&baseline_key) {
-            issues.push(format!("{{\"code\":\"baseline_mismatch\",\"severity\":\"error\",\"message\":\"computed value differs from baseline\",\"sheet\":{},\"ref\":{}}}", crate::json::escape_str(&c.sheet), crate::json::escape_str(&c.cell_ref)));
+            issues.push(
+                Issue::new(
+                    "baseline_mismatch",
+                    "error",
+                    "computed value differs from baseline",
+                )
+                .at(&c.sheet, &c.cell_ref),
+            );
         } else if matches!(&c.status, CellStatus::EngineUnsupported) {
-            issues.push(format!("{{\"code\":\"unsupported\",\"severity\":\"warning\",\"message\":\"engine refused this cell\",\"sheet\":{},\"ref\":{}}}", crate::json::escape_str(&c.sheet), crate::json::escape_str(&c.cell_ref)));
+            issues.push(
+                Issue::new("unsupported", "warning", "engine refused this cell")
+                    .at(&c.sheet, &c.cell_ref),
+            );
         } else if matches!(&c.status, CellStatus::NoOracle) {
-            issues.push(format!("{{\"code\":\"evidence_unavailable\",\"severity\":\"warning\",\"message\":\"stored cached value is unavailable\",\"sheet\":{},\"ref\":{}}}", crate::json::escape_str(&c.sheet), crate::json::escape_str(&c.cell_ref)));
+            issues.push(
+                Issue::new(
+                    "evidence_unavailable",
+                    "warning",
+                    "stored cached value is unavailable",
+                )
+                .at(&c.sheet, &c.cell_ref),
+            );
         } else if baseline_path.is_none() && matches!(&c.status, CellStatus::Mismatch { .. }) {
-            issues.push(format!("{{\"code\":\"mismatch\",\"severity\":\"error\",\"message\":\"computed value differs from stored cached value\",\"sheet\":{},\"ref\":{}}}", crate::json::escape_str(&c.sheet), crate::json::escape_str(&c.cell_ref)));
+            issues.push(
+                Issue::new(
+                    "mismatch",
+                    "error",
+                    "computed value differs from stored cached value",
+                )
+                .at(&c.sheet, &c.cell_ref),
+            );
         }
         payload.push_str(&format!("{{\"sheet\":{},\"ref\":{},\"row\":{},\"col\":{},\"formula\":{},\"calculation_outcome\":{},\"evidence\":[{{\"label\":{},\"source\":{}}}]}}", crate::json::escape_str(&c.sheet), crate::json::escape_str(&c.cell_ref), c.row, c.col, crate::json::escape_str(&c.formula), crate::json::escape_str(outcome), crate::json::escape_str(evidence), crate::json::escape_str(source)));
     }
     payload.push_str("],\"issues\":[");
-    payload.push_str(&issues.join(","));
+    payload.push_str(
+        &issues
+            .iter()
+            .map(Issue::to_json)
+            .collect::<Vec<_>>()
+            .join(","),
+    );
     payload.push_str("]}");
     // Hash the complete canonical JSON shape with a fixed placeholder for the
     // hash field itself, then replace only that placeholder. This binds the
     // receipt to summary, cells, and issues rather than a short prefix.
     let payload_hash = sha256_hex(payload.as_bytes());
     payload = payload.replace("__PAYLOAD_HASH__", &payload_hash);
-    Ok((payload, decision))
+    Ok(VerifyRun {
+        json: payload,
+        decision,
+        issues,
+        formula_cells: s.total_formula_cells,
+    })
 }
 
 /// Compare against a caller-supplied, explicitly identified Excel result
@@ -835,11 +1004,35 @@ pub fn run_supplied_excel_verify(
     excel_result_path: &Path,
     excel_build: &str,
 ) -> Result<(String, Decision), String> {
+    verify_workbook_supplied(path, policy_path, excel_result_path, excel_build)
+        .map(|run| (run.json, run.decision))
+}
+
+/// Structured form of [`run_supplied_excel_verify`].
+pub fn verify_workbook_supplied(
+    path: &Path,
+    policy_path: Option<&Path>,
+    excel_result_path: &Path,
+    excel_build: &str,
+) -> Result<VerifyRun, String> {
     if excel_build.trim().is_empty() {
         return Err("--excel-build is required with --excel-result".to_string());
     }
-    let (mut json, decision) =
-        run_verify_internal(path, policy_path, Some(excel_result_path), true)?;
+    let run = run_verify_internal(path, policy_path, Some(excel_result_path), true)?;
+    let decision = run.decision;
+    let formula_cells = run.formula_cells;
+    let issues = run
+        .issues
+        .into_iter()
+        .map(|mut issue| {
+            if issue.code == "baseline_mismatch" {
+                issue.code = "excel_result_mismatch".to_string();
+                issue.message = "computed value differs from supplied Excel result".to_string();
+            }
+            issue
+        })
+        .collect();
+    let mut json = run.json;
     let marker = "\"canonical_payload_sha256\":\"";
     let start = json
         .find(marker)
@@ -876,7 +1069,12 @@ pub fn run_supplied_excel_verify(
     json = json.replace(&old_hash, "__PAYLOAD_HASH__");
     let canonical = sha256_hex(json.as_bytes());
     json = json.replace("__PAYLOAD_HASH__", &canonical);
-    Ok((json, decision))
+    Ok(VerifyRun {
+        json,
+        decision,
+        issues,
+        formula_cells,
+    })
 }
 
 #[cfg(test)]

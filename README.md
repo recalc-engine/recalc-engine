@@ -101,22 +101,28 @@ bindings).
 
 ## Verify a workbook locally
 
-The Verify v1 command ships as the `recalc` binary of the `xl-bench` crate in
-this tree. Build and run it from a clone:
+The standalone `recalc` command needs no Rust toolchain. Download the
+archive for your platform from the
+[Releases page](https://github.com/recalc-engine/recalc-engine/releases),
+check it against `SHA256SUMS`, unpack it, and run the bundled example:
 
 ```sh
-cargo run --release -p xl-bench --bin recalc -- verify OUTPUT.xlsx \
-  --policy recalc-policy.toml --json report.json
+tar -xzf recalc-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+./recalc verify examples/demo.xlsx --policy examples/recalc-policy.toml --json report.json
 ```
 
+Exit `0` means PASS, `1` means a measured FAIL, `2` means FALLBACK because
+the requested evidence or a safe calculation was unavailable, and `64` is a
+usage error. Reports follow the versioned `recalc.verify.report/v1` schema.
 The contract is specified in
 [`docs/specs/recalc-verify-v1.md`](docs/specs/recalc-verify-v1.md); the report
-and receipt schemas sit beside it. `xl-bench/tests/fixtures/verify-policy.toml`
-is a working policy file to start from.
+and receipt schemas sit beside it, and
+[`recalc-cli/README.md`](recalc-cli/README.md) is the install guide shipped
+in every archive. Linux archives are static binaries (musl); macOS archives
+cover Apple silicon and Intel; Windows ships as a `.zip`.
 
-Exit `0` means PASS, `1` means a measured FAIL, and `2` means FALLBACK because
-the requested evidence or a safe calculation was unavailable. Reports follow
-the versioned `recalc.verify.report/v1` schema. Independent pinned-Excel
+From a clone, the same binary builds with
+`cargo run --release -p recalc-cli -- verify ...`. Independent pinned-Excel
 evidence and hosted batch service availability are separate, explicitly
 labelled workstreams.
 

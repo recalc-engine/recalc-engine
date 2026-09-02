@@ -152,7 +152,7 @@ fn per_file_report_names_do_not_collide_for_separator_ambiguous_paths() {
 
 #[test]
 fn cli_verify_dir_exit_code_precedence_load_failure_beats_mismatch() {
-    let bin = env!("CARGO_BIN_EXE_recalc");
+    let bin = env!("CARGO_BIN_EXE_recalc-bench");
 
     // Load failure present (plus a mismatch): exit 2 wins.
     let dir = make_corpus_dir("cli-precedence");
@@ -207,7 +207,7 @@ fn cli_verify_dir_exit_code_precedence_load_failure_beats_mismatch() {
 
 #[test]
 fn cli_verify_dir_streams_progress_unless_quiet() {
-    let bin = env!("CARGO_BIN_EXE_recalc");
+    let bin = env!("CARGO_BIN_EXE_recalc-bench");
     let dir = make_corpus_dir("cli-progress");
 
     let output = std::process::Command::new(bin)
@@ -248,7 +248,7 @@ fn cli_verify_dir_streams_progress_unless_quiet() {
 
 #[test]
 fn cli_rejects_flag_like_values() {
-    let bin = env!("CARGO_BIN_EXE_recalc");
+    let bin = env!("CARGO_BIN_EXE_recalc-bench");
 
     // `--html --quiet` must be the USAGE exit code 64 (Verify v1 spec §3)
     // with a clear error, not a file named `--quiet` and a silently-dropped

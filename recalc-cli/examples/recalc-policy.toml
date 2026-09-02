@@ -1,0 +1,45 @@
+# Default local policy for `recalc verify`. Every key below is optional; a
+# missing key takes the value shown here.
+#
+# Outcomes: the run ends PASS (exit 0), FAIL (exit 1), or FALLBACK (exit 2).
+# FALLBACK means Recalc could not reach a safe decision and the workbook
+# should go to a fallback path (for example, a real Excel recalculation).
+# The `on_*` keys take "fallback", "fail", or "allow".
+
+# Identifies the policy format. Keep this line as it is.
+policy_version = "recalc.verify.policy/v1"
+
+# A cell whose formula uses a function or construct Recalc does not implement
+# (`#UNSUPPORTED!`). "fallback" ends the run as FALLBACK.
+on_unsupported = "fallback"
+# A cell that reaches a sandbox-blocked source such as WEBSERVICE or RTD
+# (`#BLOCKED!`). "fallback" ends the run as FALLBACK.
+on_blocked = "fallback"
+# A cell that hit an engine resource limit (`#RESOURCE!`).
+on_resource_limit = "fallback"
+# A formula Recalc could not parse.
+on_parse_error = "fallback"
+# A formula that evaluates to an Excel error value (#DIV/0!, #REF!, #N/A ...).
+# "fail" ends the run as FAIL.
+on_formula_error = "fail"
+# A formula that references another workbook. Recalc never opens other files.
+on_external_reference = "fallback"
+# The workbook contains a VBA project. Recalc never runs macros.
+on_vba_project = "fallback"
+
+# The run needs a usable comparison source (stored values, a --baseline
+# workbook, or a supplied Excel result). Without one the run is FALLBACK.
+require_comparison = true
+# Demand a supplied Excel result (--excel-result with --excel-build) and treat
+# any other run as FALLBACK. Off by default.
+require_excel_result = false
+# Volatile functions (NOW, TODAY, RAND, ...) make a run non-reproducible
+# unless a clock or seed is injected. With this on, such a workbook is
+# FALLBACK.
+require_determinism = true
+# Accept agreement with the values stored in the workbook as evidence. A
+# stored value is what the last program that saved the file wrote; it is
+# not an independent Excel oracle result.
+allow_stored_value_match = true
+# Accept agreement with a --baseline workbook as evidence.
+allow_baseline_match = true
