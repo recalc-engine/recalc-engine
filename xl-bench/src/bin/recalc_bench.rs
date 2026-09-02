@@ -1,5 +1,7 @@
-//! `recalc` — the `xl-bench` CLI: `recalc verify <book.xlsx>` and
-//! `recalc verify-dir <dir>`.
+//! `recalc-bench` — the internal `xl-bench` harness CLI: `verify`,
+//! `verify-dir`, and the corpus triage sub-cuts. The standalone user-facing
+//! `recalc` binary lives in the `recalc-cli` crate and exposes only the
+//! Verify v1 surface; both share [`xl_bench::verify_cli`].
 //!
 //! Hand-rolled argument parsing (no `clap` — not on the approved-dependency
 //! list; the surface here is small enough that a parser dependency would be
@@ -41,6 +43,7 @@ use xl_bench::shared_residual::{
     SharedResidualTally, attribute_workbook as attribute_shared_residual,
 };
 use xl_bench::tier0::Tier0Cut;
+use xl_bench::verify_cli::{flag_value, parse_verify_args, run_v1};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -72,7 +75,7 @@ fn main() -> ExitCode {
 fn print_usage() {
     eprintln!(
         "Usage:\n  \
-         recalc verify <book.xlsx> [--policy policy.toml] [--baseline baseline.xlsx] [--excel-result result.xlsx --excel-build LABEL] [--html out.html] [--json out.json] [--quiet]\n  \
+         recalc-bench verify <book.xlsx> [--policy policy.toml] [--baseline baseline.xlsx] [--excel-result result.xlsx --excel-build LABEL] [--html out.html] [--json out.json] [--quiet]\n  \
          recalc verify-dir <dir> [--html-dir out/] [--tol=15sig] [--quiet]\n  \
          recalc tier0 <dir> [--top N] [--dump-mismatch FN1,FN2] [--dump-unsupported FN1,FN2] [--dump-n N] [--tol=15sig] [--quiet]   (INTERNAL Tier-0 fidelity cut)\n  \
          recalc decline-attribution <dir> [--top N] [--dump-cells FILE] [--quiet]   (root-cause classify every #UNSUPPORTED!/#BLOCKED!/#RESOURCE! cell; --dump-cells streams one workbook\\tsheet\\tA1\\tclass line per declined cell)\n  \
@@ -87,115 +90,11 @@ fn print_usage() {
     );
 }
 
-/// Fetches the value for `flag` at `args[i]`, rejecting a missing value or
-/// one that looks like another flag — `recalc verify book.xlsx --html
-/// --quiet` must be a hard error, not a silently-created file named
-/// `--quiet` with the quiet flag dropped.
-fn flag_value(args: &[String], i: usize, flag: &str) -> Result<PathBuf, String> {
-    match args.get(i) {
-        None => Err(format!("{flag} requires a value")),
-        Some(v) if v.starts_with("--") => Err(format!(
-            "{flag} requires a value, but got the flag-like argument {v:?} \
-             (a value may not start with `--`)"
-        )),
-        Some(v) => Ok(PathBuf::from(v)),
-    }
-}
-
-/// Write a machine report without ever leaving a partially truncated target.
-fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut tmp = path.to_path_buf();
-    let suffix = format!(".tmp-{}", std::process::id());
-    let name = tmp
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("report.json");
-    tmp.set_file_name(format!("{name}{suffix}"));
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        std::io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(tmp, path)
-}
-
 fn fmt_pct(p: Option<f64>) -> String {
     match p {
         Some(x) => format!("{x:.2}%"),
         None => "n/a".to_string(),
     }
-}
-
-struct VerifyArgs {
-    input: PathBuf,
-    html: Option<PathBuf>,
-    json: Option<PathBuf>,
-    policy: Option<PathBuf>,
-    baseline: Option<PathBuf>,
-    excel_result: Option<PathBuf>,
-    excel_build: Option<String>,
-    quiet: bool,
-}
-
-fn parse_verify_args(args: &[String]) -> Result<VerifyArgs, String> {
-    let mut input = None;
-    let mut html = None;
-    let mut json = None;
-    let mut policy = None;
-    let mut baseline = None;
-    let mut excel_result = None;
-    let mut excel_build = None;
-    let mut quiet = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--html" => {
-                i += 1;
-                html = Some(flag_value(args, i, "--html")?);
-            }
-            "--json" => {
-                i += 1;
-                json = Some(flag_value(args, i, "--json")?);
-            }
-            "--policy" => {
-                i += 1;
-                policy = Some(flag_value(args, i, "--policy")?);
-            }
-            "--baseline" => {
-                i += 1;
-                baseline = Some(flag_value(args, i, "--baseline")?);
-            }
-            "--excel-result" => {
-                i += 1;
-                excel_result = Some(flag_value(args, i, "--excel-result")?);
-            }
-            "--excel-build" => {
-                i += 1;
-                excel_build = Some(
-                    flag_value(args, i, "--excel-build")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--quiet" => quiet = true,
-            other if input.is_none() && !other.starts_with("--") => {
-                input = Some(PathBuf::from(other));
-            }
-            other => return Err(format!("unrecognized argument: {other}")),
-        }
-        i += 1;
-    }
-    let input = input.ok_or("missing <book.xlsx> argument")?;
-    Ok(VerifyArgs {
-        input,
-        html,
-        json,
-        policy,
-        baseline,
-        excel_result,
-        excel_build,
-        quiet,
-    })
 }
 
 fn cmd_verify(args: &[String]) -> ExitCode {
@@ -208,57 +107,15 @@ fn cmd_verify(args: &[String]) -> ExitCode {
         }
     };
 
-    if parsed.excel_result.is_some() != parsed.excel_build.is_some() {
-        eprintln!("recalc verify: --excel-result and --excel-build must be supplied together");
-        return ExitCode::from(64);
-    }
-    let policy = match xl_bench::verify::load_policy(parsed.policy.as_deref()) {
-        Ok((p, _)) => p,
-        Err(e) => {
-            eprintln!("recalc verify: invalid policy: {e}");
-            return ExitCode::from(64);
-        }
-    };
-
     if parsed.policy.is_some() || parsed.baseline.is_some() || parsed.excel_result.is_some() {
-        let Some(json_path) = parsed.json.as_ref() else {
+        // Verify v1 contract (shared with the standalone `recalc` binary).
+        // The harness insists on a JSON report so a policy run always leaves
+        // a machine-readable artifact behind.
+        if parsed.json.is_none() {
             eprintln!("recalc verify: Verify v1 mode requires --json report.json");
             return ExitCode::from(64);
-        };
-        let result = if let (Some(excel_result), Some(excel_build)) =
-            (&parsed.excel_result, &parsed.excel_build)
-        {
-            xl_bench::verify::run_supplied_excel_verify(
-                &parsed.input,
-                parsed.policy.as_deref(),
-                excel_result,
-                excel_build,
-            )
-        } else {
-            xl_bench::verify::run_verify_v1(
-                &parsed.input,
-                parsed.policy.as_deref(),
-                parsed.baseline.as_deref(),
-            )
-        };
-        let (json, decision) = match result {
-            Ok(result) => result,
-            Err(e) => {
-                eprintln!("recalc verify: {e}");
-                return ExitCode::from(2);
-            }
-        };
-        if let Err(e) = write_atomic(json_path, json.as_bytes()) {
-            eprintln!(
-                "recalc verify: failed to write JSON report to {}: {e}",
-                json_path.display()
-            );
-            return ExitCode::from(64);
         }
-        if !parsed.quiet {
-            println!("{}: {:?}", parsed.input.display(), decision);
-        }
-        return ExitCode::from(decision.exit_code());
+        return ExitCode::from(run_v1(&parsed, "recalc"));
     }
 
     let report = match run_workbook(&parsed.input, DiffConfig::default()) {
@@ -304,15 +161,10 @@ fn cmd_verify(args: &[String]) -> ExitCode {
         );
     }
 
+    // A policy, baseline, or supplied result always takes the Verify v1 path
+    // above, so this legacy diff report never carries a policy decision.
     if report.summary.has_mismatch() {
         ExitCode::from(1)
-    } else if parsed.policy.is_some()
-        && policy.require_comparison
-        && (report.summary.engine_unsupported > 0 || report.summary.no_oracle > 0)
-    {
-        // Legacy reports cannot distinguish every v1 refusal category yet,
-        // so an explicit policy never permits an unscored PASS.
-        ExitCode::from(2)
     } else {
         ExitCode::from(0)
     }
@@ -324,7 +176,7 @@ struct VerifyDirArgs {
     quiet: bool,
     /// `--tol=15sig` (alias `--fuzzy`) sets `DiffConfig::fuzzy_15sig` — the
     /// ratified 15-significant-figure float scoring tolerance (TOLERANCES.md,
-    /// the contract review checkpoint 2026-07-13). Off by default: the bare command reports the
+    /// ratified 2026-07-13). Off by default: the bare command reports the
     /// bit-exact conservative floor, so a plain `verify-dir` is unchanged.
     fuzzy: bool,
 }
@@ -502,7 +354,7 @@ struct Tier0Args {
     dump_n: usize,
     /// `--tol=15sig` (alias `--fuzzy`) sets `DiffConfig::fuzzy_15sig` — the
     /// ratified 15-significant-figure float scoring tolerance (TOLERANCES.md,
-    /// the contract review checkpoint 2026-07-13). Off by default: the bare command reports
+    /// ratified 2026-07-13). Off by default: the bare command reports
     /// the strict (bit-exact) conservative floor.
     fuzzy: bool,
 }

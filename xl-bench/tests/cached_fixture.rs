@@ -85,7 +85,7 @@ fn html_report_renders_summary_and_mismatch_row() {
 
 #[test]
 fn cli_verify_exits_1_on_mismatch_and_writes_reports() {
-    let bin = env!("CARGO_BIN_EXE_recalc");
+    let bin = env!("CARGO_BIN_EXE_recalc-bench");
     let tmp = std::env::temp_dir().join(format!(
         "xl-bench-cli-test-{}-{}",
         std::process::id(),
@@ -122,7 +122,7 @@ fn cli_verify_exits_1_on_mismatch_and_writes_reports() {
 /// zip archive) — the CLI's "load/parse failure" contract.
 #[test]
 fn cli_verify_exits_2_on_load_failure() {
-    let bin = env!("CARGO_BIN_EXE_recalc");
+    let bin = env!("CARGO_BIN_EXE_recalc-bench");
     let tmp = std::env::temp_dir().join(format!(
         "xl-bench-cli-test-{}-{}",
         std::process::id(),
@@ -151,7 +151,7 @@ fn cli_verify_exits_2_on_load_failure() {
 fn cli_verify_exits_0_when_nothing_is_wrong() {
     let clean = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/clean_values.xlsx");
 
-    let bin = env!("CARGO_BIN_EXE_recalc");
+    let bin = env!("CARGO_BIN_EXE_recalc-bench");
     let output = std::process::Command::new(bin)
         .arg("verify")
         .arg(&clean)
@@ -169,7 +169,7 @@ fn cli_verify_exits_0_when_nothing_is_wrong() {
 
 #[test]
 fn cli_verify_policy_mode_emits_v1_report_and_requires_json() {
-    let bin = env!("CARGO_BIN_EXE_recalc");
+    let bin = env!("CARGO_BIN_EXE_recalc-bench");
     let policy =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verify-policy.toml");
     let tmp = std::env::temp_dir().join(format!("xl-bench-v1-{}", std::process::id()));
@@ -194,7 +194,7 @@ fn cli_verify_policy_mode_emits_v1_report_and_requires_json() {
 
 #[test]
 fn cli_verify_accepts_identified_excel_result() {
-    let bin = env!("CARGO_BIN_EXE_recalc");
+    let bin = env!("CARGO_BIN_EXE_recalc-bench");
     let policy =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verify-policy.toml");
     let tmp = std::env::temp_dir().join(format!("xl-bench-excel-v1-{}", std::process::id()));
@@ -224,7 +224,7 @@ fn cli_verify_accepts_identified_excel_result() {
 /// `FALLBACK` code 2 that a load failure legitimately returns.
 #[test]
 fn cli_verify_exits_64_on_invalid_arguments() {
-    let bin = env!("CARGO_BIN_EXE_recalc");
+    let bin = env!("CARGO_BIN_EXE_recalc-bench");
     let output = std::process::Command::new(bin)
         .arg("verify")
         .arg("--quiet")

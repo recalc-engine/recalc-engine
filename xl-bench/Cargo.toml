@@ -45,5 +45,8 @@ xl-fn = { path = "../xl-fn" }
 xl-value = { path = "../xl-value", features = ["test-util"] }
 
 [[bin]]
-name = "recalc"
-path = "src/bin/recalc.rs"
+# Internal harness binary. The user-facing standalone `recalc` binary is the
+# `recalc-cli` crate; keeping distinct names avoids an output-name collision in
+# `cargo build --workspace`.
+name = "recalc-bench"
+path = "src/bin/recalc_bench.rs"

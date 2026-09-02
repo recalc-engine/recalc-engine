@@ -1,0 +1,579 @@
+name: Release CLI
+
+# Builds the standalone `recalc` CLI binary for five targets, packages one
+# archive per target, smoke-tests every archive on a clean machine that has no
+# Rust toolchain, and (only on a `cli-v<semver>` tag) publishes the archives as
+# a GitHub Release together with SHA256SUMS and a build provenance attestation.
+#
+# `workflow_dispatch` is a dry run: build + checksums + smoke, no release. The
+# version is then the workspace crate version, with no release created.
+#
+# Job graph: meta -> build (x5) -> checksums -> smoke (x5) -> release (tag only)
+on:
+  workflow_dispatch:
+  # Pull requests get the full build + clean-machine smoke run (no release),
+  # so a change to the CLI is proven on every target before it merges.
+  pull_request:
+    paths:
+      - ".github/workflows/release-cli.yml"
+      - "recalc-cli/**"
+      - "xl-bench/**"
+      - "xl-*/**"
+      - "recalc-engine/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  push:
+    tags:
+      - "cli-v*"
+
+# One run per ref at a time. Runs queue instead of cancelling, so a release in
+# flight is never interrupted halfway through.
+concurrency:
+  group: release-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve the version and short commit SHA once, so every job agrees on them.
+  # ---------------------------------------------------------------------------
+  meta:
+    name: resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      short_sha: ${{ steps.resolve.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version and short SHA
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The binary reports the workspace crate version, so that is the
+          # version of record. A release tag must name the same version.
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          test -n "$version" || { echo "ERROR: no workspace version in Cargo.toml"; exit 1; }
+          if [[ "$GITHUB_REF" == refs/tags/cli-v* ]]; then
+            tag_version="${GITHUB_REF_NAME#cli-v}"
+            if ! [[ "$tag_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+              echo "ERROR: tag '$GITHUB_REF_NAME' does not carry a semver version after 'cli-v'"
+              exit 1
+            fi
+            if [[ "$tag_version" != "$version" ]]; then
+              echo "ERROR: tag version '$tag_version' does not match crate version '$version'"
+              exit 1
+            fi
+          fi
+          short_sha="${GITHUB_SHA:0:7}"
+          echo "version=$version"   >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version short_sha=$short_sha"
+
+  # ---------------------------------------------------------------------------
+  # Build the release binary per target and package it with LICENSE, README
+  # and the examples directory. One artifact per target, named after the target.
+  # ---------------------------------------------------------------------------
+  build:
+    name: build ${{ matrix.target }}
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            ext: tar.gz
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            ext: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            ext: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            ext: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            ext: zip
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      ARCHIVE: recalc-v${{ needs.meta.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+      # Keep macOS `tar` from adding AppleDouble (`._*`) entries to the archive.
+      COPYFILE_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain + target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add "$TARGET"
+      # The CLI is pure Rust with no C dependencies, so the musl targets build
+      # with plain rustup targets; no cross-compilation tooling is needed.
+      # RECALC_GIT_HASH is read at compile time and baked into `recalc --version`.
+      - name: cargo build --release
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RECALC_GIT_HASH="$(git rev-parse --short HEAD)"
+          echo "RECALC_GIT_HASH=$RECALC_GIT_HASH"
+          cargo build --release --locked -p recalc-cli --target "$TARGET"
+      - name: Package archive (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf stage dist
+          mkdir -p stage dist
+          cp "target/$TARGET/release/recalc" stage/recalc
+          cp LICENSE stage/LICENSE
+          cp recalc-cli/README.md stage/README.md
+          cp -R recalc-cli/examples stage/examples
+          tar -C stage -czf "dist/$ARCHIVE" recalc LICENSE README.md examples
+          echo "Contents of $ARCHIVE:"
+          tar -tzf "dist/$ARCHIVE"
+      - name: Package archive (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item -Recurse -Force stage, dist -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path stage, dist | Out-Null
+          Copy-Item "target\$env:TARGET\release\recalc.exe" stage\recalc.exe
+          Copy-Item LICENSE stage\LICENSE
+          Copy-Item recalc-cli\README.md stage\README.md
+          Copy-Item -Recurse recalc-cli\examples stage\examples
+          Compress-Archive -Path stage\* -DestinationPath "dist\$env:ARCHIVE" -CompressionLevel Optimal
+          Write-Host "Contents of $env:ARCHIVE:"
+          Get-ChildItem -Recurse stage | Select-Object -ExpandProperty FullName
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Collect every archive and write SHA256SUMS (sha256sum format, one line per
+  # archive, sorted by name). Uploaded as its own artifact.
+  # ---------------------------------------------------------------------------
+  checksums:
+    name: checksums
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          count="$(ls recalc-v*.tar.gz recalc-v*.zip | wc -l)"
+          if [ "$count" -ne 5 ]; then
+            echo "ERROR: expected 5 archives, found $count"
+            exit 1
+          fi
+          ls recalc-v*.tar.gz recalc-v*.zip | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+          echo "SHA256SUMS:"
+          cat SHA256SUMS
+      - name: Upload SHA256SUMS
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Smoke-test each archive on a clean machine with no Rust toolchain: verify
+  # the checksum, extract, and run the shipped binary end to end. Every check
+  # fails loudly. No repository checkout, no `rustup`, no `cargo`.
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: smoke ${{ matrix.target }}
+    needs: [meta, checksums]
+    runs-on: ${{ matrix.runner }}
+    # Empty for macOS/Windows, which then run directly on the runner VM.
+    container: ${{ matrix.container }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            container: debian:bookworm-slim
+            ext: tar.gz
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            container: debian:bookworm-slim
+            ext: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            ext: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            ext: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            ext: zip
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      SHORT_SHA: ${{ needs.meta.outputs.short_sha }}
+      ARCHIVE: recalc-v${{ needs.meta.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: smoke
+    steps:
+      # The Debian image is bare: install only what the checks below need.
+      # python3 is used solely for `python3 -m json.tool`. No Rust is installed.
+      - name: Install minimal tools (Debian container)
+        if: runner.os == 'Linux'
+        working-directory: /
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates python3 coreutils
+      # macOS and Windows hosted runners ship with Rust preinstalled under
+      # $HOME/.cargo/bin. Writing to $GITHUB_PATH only prepends entries, so the
+      # cleaned PATH is exported through $GITHUB_ENV instead, which replaces the
+      # variable for every following step. The assertion step below proves the
+      # toolchain is really gone; if the override did not take, that step fails.
+      - name: Remove the preinstalled Rust toolchain from PATH (macOS)
+        if: runner.os == 'macOS'
+        working-directory: /
+        run: |
+          set -euo pipefail
+          clean="$(echo "$PATH" | tr ':' '\n' | grep -viE '\.cargo|rustup' | paste -sd: -)"
+          echo "PATH=$clean" >> "$GITHUB_ENV"
+          echo "Cleaned PATH: $clean"
+      - name: Remove the preinstalled Rust toolchain from PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: .
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $clean = ($env:Path -split ';' | Where-Object { $_ -and ($_ -notmatch '(?i)\.cargo|rustup') }) -join ';'
+          Add-Content -Path $env:GITHUB_ENV -Value "PATH=$clean"
+          Write-Host "Cleaned PATH: $clean"
+      - name: Assert no Rust toolchain is present
+        if: runner.os != 'Windows'
+        working-directory: /
+        run: |
+          set -euo pipefail
+          if command -v cargo; then echo "ERROR: cargo is on PATH; this is not a clean machine"; exit 1; fi
+          if command -v rustc; then echo "ERROR: rustc is on PATH; this is not a clean machine"; exit 1; fi
+          echo "OK: no cargo, no rustc"
+      - name: Assert no Rust toolchain is present (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: .
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($tool in @('cargo', 'rustc')) {
+            $found = Get-Command $tool -ErrorAction SilentlyContinue
+            if ($found) { throw "ERROR: $tool is on PATH ($($found.Source)); this is not a clean machine" }
+          }
+          Write-Host "OK: no cargo, no rustc"
+          exit 0
+      - name: Download archive for this target
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: smoke
+      - name: Download SHA256SUMS
+        uses: actions/download-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: smoke
+      - name: Verify checksum
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          ls -la
+          awk -v f="$ARCHIVE" '$2 == f' SHA256SUMS > expected.sum
+          if [ "$(wc -l < expected.sum)" -ne 1 ]; then
+            echo "ERROR: SHA256SUMS has no (single) entry for $ARCHIVE"
+            cat SHA256SUMS
+            exit 1
+          fi
+          case "$RUNNER_OS" in
+            Linux) sha256sum -c --ignore-missing SHA256SUMS ;;
+            macOS) shasum -a 256 -c expected.sum ;;
+            *) echo "ERROR: unexpected RUNNER_OS=$RUNNER_OS"; exit 1 ;;
+          esac
+      - name: Verify checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem
+          $pattern = '^([0-9a-fA-F]{64})\s+\*?' + [regex]::Escape($env:ARCHIVE) + '$'
+          $lines = @(Get-Content SHA256SUMS | Where-Object { $_ -match $pattern })
+          if ($lines.Count -ne 1) { throw "ERROR: SHA256SUMS has no (single) entry for $env:ARCHIVE" }
+          $expected = ([regex]::Match($lines[0], $pattern)).Groups[1].Value.ToLowerInvariant()
+          $actual = (Get-FileHash -Path $env:ARCHIVE -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw "ERROR: checksum mismatch for $env:ARCHIVE: expected $expected, got $actual" }
+          Write-Host "${env:ARCHIVE}: OK"
+      - name: Extract archive
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          tar -xzf "$ARCHIVE"
+          ls -la . examples
+          test -x recalc
+          test -f LICENSE
+          test -f README.md
+          test -f examples/demo.xlsx
+          test -f examples/demo-stale.xlsx
+          test -f examples/recalc-policy.toml
+          test -f examples/README.md
+      - name: Extract archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive -Path $env:ARCHIVE -DestinationPath . -Force
+          Get-ChildItem -Recurse
+          foreach ($f in @('recalc.exe', 'LICENSE', 'README.md', 'examples\demo.xlsx', 'examples\demo-stale.xlsx', 'examples\recalc-policy.toml', 'examples\README.md')) {
+            if (-not (Test-Path $f)) { throw "ERROR: $f missing from archive" }
+          }
+      - name: recalc --version
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          set +e; out="$(./recalc --version)"; code=$?; set -e
+          echo "$out"
+          test "$code" -eq 0 || { echo "ERROR: --version exited $code"; exit 1; }
+          first="${out%%$'\n'*}"
+          case "$first" in
+            "recalc $VERSION"|"recalc $VERSION "*) ;;
+            *) echo "ERROR: expected output to start with 'recalc $VERSION'"; exit 1 ;;
+          esac
+          grep -qF -- "$SHORT_SHA" <<<"$out" || { echo "ERROR: output does not contain commit $SHORT_SHA"; exit 1; }
+          echo "OK: version $VERSION, commit $SHORT_SHA"
+      # In pwsh 7.4+ a non-zero native exit code raises an error when
+      # $ErrorActionPreference is Stop. The binary is expected to exit non-zero
+      # in later steps, so that behaviour is switched off and $LASTEXITCODE is
+      # checked explicitly instead.
+      - name: recalc --version (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = (& .\recalc.exe --version | Out-String).Trim()
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) { throw "ERROR: --version exited $code" }
+          $first = ($out -split "`r?`n")[0]
+          if (-not ($first -eq "recalc $env:VERSION" -or $first.StartsWith("recalc $env:VERSION "))) {
+            throw "ERROR: expected output to start with 'recalc $env:VERSION'"
+          }
+          if (-not $out.Contains($env:SHORT_SHA)) { throw "ERROR: output does not contain commit $env:SHORT_SHA" }
+          Write-Host "OK: version $env:VERSION, commit $env:SHORT_SHA"
+          exit 0
+      # The report is re-serialised in compact form before the substring checks,
+      # so the assertions do not depend on the pretty-printing of the writer.
+      - name: recalc verify demo.xlsx (expect pass, exit 0)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          set +e
+          ./recalc verify examples/demo.xlsx --policy examples/recalc-policy.toml --json report.json --quiet
+          code=$?
+          set -e
+          test "$code" -eq 0 || { echo "ERROR: expected exit 0, got $code"; exit 1; }
+          python3 -m json.tool report.json > /dev/null
+          compact="$(python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' report.json)"
+          echo "$compact"
+          grep -qF -- '"schema_version":"recalc.verify.report/v1"' <<<"$compact" || { echo "ERROR: schema_version missing or wrong"; exit 1; }
+          grep -qF -- '"decision":"pass"' <<<"$compact" || { echo "ERROR: decision is not pass"; exit 1; }
+          echo "OK: demo.xlsx passes"
+      - name: recalc verify demo.xlsx (expect pass, exit 0) (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & .\recalc.exe verify examples\demo.xlsx --policy examples\recalc-policy.toml --json report.json --quiet
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "ERROR: expected exit 0, got $code" }
+          python -m json.tool report.json | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "ERROR: report.json does not parse" }
+          $compact = Get-Content -Raw report.json | ConvertFrom-Json | ConvertTo-Json -Compress -Depth 100
+          Write-Host $compact
+          if (-not $compact.Contains('"schema_version":"recalc.verify.report/v1"')) { throw "ERROR: schema_version missing or wrong" }
+          if (-not $compact.Contains('"decision":"pass"')) { throw "ERROR: decision is not pass" }
+          Write-Host "OK: demo.xlsx passes"
+          exit 0
+      - name: recalc verify demo-stale.xlsx (expect fail, exit 1)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          set +e
+          ./recalc verify examples/demo-stale.xlsx --policy examples/recalc-policy.toml --json stale.json --quiet
+          code=$?
+          set -e
+          test "$code" -eq 1 || { echo "ERROR: expected exit 1, got $code"; exit 1; }
+          python3 -m json.tool stale.json > /dev/null
+          compact="$(python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' stale.json)"
+          echo "$compact"
+          grep -qF -- '"decision":"fail"' <<<"$compact" || { echo "ERROR: decision is not fail"; exit 1; }
+          grep -qF -- 'differs_stored' <<<"$compact" || { echo "ERROR: report does not mention differs_stored"; exit 1; }
+          echo "OK: demo-stale.xlsx fails as expected"
+      - name: recalc verify demo-stale.xlsx (expect fail, exit 1) (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & .\recalc.exe verify examples\demo-stale.xlsx --policy examples\recalc-policy.toml --json stale.json --quiet
+          $code = $LASTEXITCODE
+          if ($code -ne 1) { throw "ERROR: expected exit 1, got $code" }
+          python -m json.tool stale.json | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "ERROR: stale.json does not parse" }
+          $compact = Get-Content -Raw stale.json | ConvertFrom-Json | ConvertTo-Json -Compress -Depth 100
+          Write-Host $compact
+          if (-not $compact.Contains('"decision":"fail"')) { throw "ERROR: decision is not fail" }
+          if (-not $compact.Contains('differs_stored')) { throw "ERROR: report does not mention differs_stored" }
+          Write-Host "OK: demo-stale.xlsx fails as expected"
+          exit 0
+      - name: Exit codes for usage error (64) and non-workbook input (2)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          set +e; ./recalc verify --quiet; code=$?; set -e
+          test "$code" -eq 64 || { echo "ERROR: expected usage exit 64, got $code"; exit 1; }
+          set +e; ./recalc verify examples/README.md --json bad.json --quiet; code=$?; set -e
+          test "$code" -eq 2 || { echo "ERROR: expected exit 2 for a non-workbook, got $code"; exit 1; }
+          echo "OK: exit 64 without a workbook, exit 2 for a non-workbook"
+      - name: Exit codes for usage error (64) and non-workbook input (2) (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & .\recalc.exe verify --quiet
+          $code = $LASTEXITCODE
+          if ($code -ne 64) { throw "ERROR: expected usage exit 64, got $code" }
+          & .\recalc.exe verify examples\README.md --json bad.json --quiet
+          $code = $LASTEXITCODE
+          if ($code -ne 2) { throw "ERROR: expected exit 2 for a non-workbook, got $code" }
+          Write-Host "OK: exit 64 without a workbook, exit 2 for a non-workbook"
+          exit 0
+
+  # ---------------------------------------------------------------------------
+  # Tag only: attest build provenance for the archives and publish a GitHub
+  # Release with the archives, SHA256SUMS and generated release notes.
+  # ---------------------------------------------------------------------------
+  release:
+    name: publish GitHub release
+    needs: [meta, smoke]
+    # A tag push is the only way to publish; a manual dispatch on a tag ref
+    # must stay a dry run.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cli-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - name: Download all archives and SHA256SUMS
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la dist
+          count="$(ls dist/recalc-v*.tar.gz dist/recalc-v*.zip | wc -l)"
+          test "$count" -eq 5 || { echo "ERROR: expected 5 archives, found $count"; exit 1; }
+          test -f dist/SHA256SUMS || { echo "ERROR: SHA256SUMS missing"; exit 1; }
+          (cd dist && sha256sum -c SHA256SUMS)
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/recalc-v*.tar.gz
+            dist/recalc-v*.zip
+      - name: Write release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > notes.template <<'EOF'
+          # recalc CLI v@VERSION@
+
+          - Version: `@VERSION@`
+          - Commit: `@SHA@`
+          - Targets:
+            - `x86_64-unknown-linux-musl`
+            - `aarch64-unknown-linux-musl`
+            - `aarch64-apple-darwin`
+            - `x86_64-apple-darwin`
+            - `x86_64-pc-windows-msvc`
+
+          ## What this is
+
+          Recalc Verify checks a workbook locally, with no Excel installation and no
+          network: it recalculates the workbook and compares the result with the stored
+          values under the given policy. Exit code `0` means pass, `1` means fail, `2`
+          means the run fell back and could not deliver a verdict, and `64` means a usage
+          error. The JSON report follows schema `recalc.verify.report/v1`.
+
+          ## Verify your download
+
+          Check the archive against the published checksums:
+
+          ```sh
+          sha256sum -c SHA256SUMS --ignore-missing
+          ```
+
+          Every archive carries a build provenance attestation created by GitHub
+          Actions for this release. `gh release verify-asset` is the GitHub CLI command
+          for this; the form that works today is:
+
+          ```sh
+          gh attestation verify recalc-v@VERSION@-<target>.tar.gz --repo recalc-engine/recalc-engine
+          ```
+
+          Each archive contains `recalc` (or `recalc.exe`), `LICENSE`, `README.md` and an
+          `examples/` directory with a demo workbook, a stale demo workbook and a policy file.
+          EOF
+          sed -e "s|@VERSION@|$VERSION|g" -e "s|@SHA@|$GITHUB_SHA|g" notes.template > notes.md
+          cat notes.md
+      # A hyphen in the version (e.g. 1.2.0-rc.1) marks a pre-release.
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          flags=()
+          case "$VERSION" in
+            *-*) flags+=(--prerelease) ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "recalc CLI v$VERSION" \
+            --notes-file notes.md \
+            "${flags[@]}" \
+            dist/recalc-v*.tar.gz dist/recalc-v*.zip dist/SHA256SUMS

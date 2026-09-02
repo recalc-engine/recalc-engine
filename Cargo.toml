@@ -10,6 +10,7 @@ members = [
     "recalc-engine",
     "xl-ffi",
     "xl-bench",
+    "recalc-cli",
 ]
 
 [workspace.dependencies]

@@ -36,6 +36,11 @@ cell (`A3 = A1/A2` with `A2 = 0` → `#DIV/0!`, `A4 = SUM(A1:A2)` → `2`), so
 the Verify v1 summary tests can check that `formula_errors` and
 `recalc_computed` are disjoint buckets.
 
+**`parse_error.xlsx`** holds one formula whose text does not parse
+(`A3 = SUM(A1:A2`, unbalanced) next to one clean formula (`A4`), so the
+Verify v1 tests can check that a parse failure is reported as `parse_failed`
+and answers to `on_parse_error` rather than `on_unsupported`.
+
 Per `xl-bench/README.md`: this harness's real oracle corpus is
 proprietary and never committed — these fixtures are the opposite of that:
 small, synthetic, Apache-2.0-licensed files whose entire contents are

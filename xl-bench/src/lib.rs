@@ -75,3 +75,4 @@ pub mod shared_residual;
 pub mod sidecar;
 pub mod tier0;
 pub mod verify;
+pub mod verify_cli;

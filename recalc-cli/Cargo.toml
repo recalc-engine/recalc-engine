@@ -1,0 +1,21 @@
+[package]
+name = "recalc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+# Distributed as a standalone binary through GitHub Releases, not as a crate:
+# the CLI surface is not a Cargo API commitment yet.
+publish = false
+description = "Standalone `recalc` command: local, evidence-labelled verification of .xlsx/.xlsm workbooks (Recalc Verify v1)."
+
+[dependencies]
+# Workspace-internal only (the zero-dependency rule applies here too). The
+# Verify v1 implementation and its shared argument parser live in xl-bench;
+# this binary exposes only the `verify` subcommand of that library.
+xl-bench = { path = "../xl-bench" }
+
+[[bin]]
+name = "recalc"
+path = "src/main.rs"

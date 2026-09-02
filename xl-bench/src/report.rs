@@ -67,10 +67,11 @@ pub struct EngineMeta {
 }
 
 /// Resolves [`EngineMeta`]: `version` from `CARGO_PKG_VERSION`; `git_hash`
-/// from the `RECALC_GIT_HASH` environment variable if set (the documented
-/// hook for CI/release builds to pin an exact hash without relying on a
-/// `.git` directory being present at runtime), else by shelling out to
-/// `git rev-parse --short HEAD` in the current directory, else `"unknown"`.
+/// from `RECALC_GIT_HASH` baked in at **compile time** if the release build
+/// set it (a shipped binary must never report the hash of whatever repository
+/// the user happens to run it in), else the same variable at run time, else
+/// by shelling out to `git rev-parse --short HEAD` in the current directory,
+/// else `"unknown"`.
 ///
 /// **Memoized** (`OnceLock`): the identity of the running engine cannot
 /// change mid-process, and shelling out to `git` per workbook is measurable
@@ -81,8 +82,10 @@ pub fn engine_meta() -> EngineMeta {
     static META: std::sync::OnceLock<EngineMeta> = std::sync::OnceLock::new();
     META.get_or_init(|| {
         let version = env!("CARGO_PKG_VERSION").to_string();
-        let git_hash = std::env::var("RECALC_GIT_HASH")
-            .ok()
+        let git_hash = option_env!("RECALC_GIT_HASH")
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("RECALC_GIT_HASH").ok())
             .filter(|s| !s.is_empty())
             .or_else(git_hash_from_repo)
             .unwrap_or_else(|| "unknown".to_string());
