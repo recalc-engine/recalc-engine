@@ -289,6 +289,7 @@ jobs:
             if ($found) { throw "ERROR: $tool is on PATH ($($found.Source)); this is not a clean machine" }
           }
           Write-Host "OK: no cargo, no rustc"
+          exit 0
       - name: Download archive for this target
         uses: actions/download-artifact@v4
         with:
@@ -385,6 +386,7 @@ jobs:
           }
           if (-not $out.Contains($env:SHORT_SHA)) { throw "ERROR: output does not contain commit $env:SHORT_SHA" }
           Write-Host "OK: version $env:VERSION, commit $env:SHORT_SHA"
+          exit 0
       # The report is re-serialised in compact form before the substring checks,
       # so the assertions do not depend on the pretty-printing of the writer.
       - name: recalc verify demo.xlsx (expect pass, exit 0)
@@ -418,6 +420,7 @@ jobs:
           if (-not $compact.Contains('"schema_version":"recalc.verify.report/v1"')) { throw "ERROR: schema_version missing or wrong" }
           if (-not $compact.Contains('"decision":"pass"')) { throw "ERROR: decision is not pass" }
           Write-Host "OK: demo.xlsx passes"
+          exit 0
       - name: recalc verify demo-stale.xlsx (expect fail, exit 1)
         if: runner.os != 'Windows'
         run: |
@@ -449,6 +452,7 @@ jobs:
           if (-not $compact.Contains('"decision":"fail"')) { throw "ERROR: decision is not fail" }
           if (-not $compact.Contains('differs_stored')) { throw "ERROR: report does not mention differs_stored" }
           Write-Host "OK: demo-stale.xlsx fails as expected"
+          exit 0
       - name: Exit codes for usage error (64) and non-workbook input (2)
         if: runner.os != 'Windows'
         run: |
@@ -471,6 +475,7 @@ jobs:
           $code = $LASTEXITCODE
           if ($code -ne 2) { throw "ERROR: expected exit 2 for a non-workbook, got $code" }
           Write-Host "OK: exit 64 without a workbook, exit 2 for a non-workbook"
+          exit 0
 
   # ---------------------------------------------------------------------------
   # Tag only: attest build provenance for the archives and publish a GitHub
