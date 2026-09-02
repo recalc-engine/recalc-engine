@@ -110,7 +110,7 @@ bindings).
 The canonical Verify v1 command is distributed with the benchmark/CLI build:
 
 ```sh
-recalc verify OUTPUT.xlsx --baseline INPUT.xlsx \
+recalc verify OUTPUT.xlsx \
   --policy recalc-policy.toml --json report.json
 ```
 
@@ -124,7 +124,9 @@ labelled workstreams.
 
 Compatibility claims are evidence-scoped. Recalc reports whether a value was
 computed, matched a stored value, matched a supplied baseline, or was refused.
-Do not infer pinned-Excel agreement from a local cached-value run.
+Baseline and supplied-Excel flags are reserved for the typed evidence pipeline
+and are refused by the current CLI. Do not infer pinned-Excel agreement from a
+local cached-value run.
 
 ## Scope — what it is, and isn't
 
