@@ -39,6 +39,9 @@
 //! - [`shared_residual`] — `recalc shared-residual`'s instrumentation of *why*
 //!   each bodyless shared-formula follow-on still declines, keyed to the master
 //!   formula text that failed to parse (Lane A triage).
+//! - [`l2site`] — `recalc l2-decomp`'s refusal-site decomposition of the
+//!   `other_shared_expanded` sub-bucket (would-expand shared follow-ons that
+//!   refuse at *runtime* — the W-B doc's L2 lane).
 //! - [`mismatch`] — `recalc mismatch-mine`'s corpus-wide decomposition of the
 //!   genuine-fidelity-failure set (every `Mismatch` cell) by function
 //!   vocabulary, expected→actual type transition, and named pattern.
@@ -62,10 +65,13 @@ pub mod cellhash;
 pub mod corpus;
 pub mod decline;
 pub mod diff;
+pub mod hash;
 pub mod html;
 pub mod json;
+pub mod l2site;
 pub mod mismatch;
 pub mod report;
 pub mod shared_residual;
 pub mod sidecar;
 pub mod tier0;
+pub mod verify;

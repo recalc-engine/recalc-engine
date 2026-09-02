@@ -31,6 +31,11 @@ docstring for the full table):
 above (literals plus the one Exact `SUM` cell), so a `verify` run over it
 exits 0 and its row in `verify-dir`'s aggregate index reads "ok".
 
+**`error_values.xlsx`** holds one formula error next to one clean formula
+cell (`A3 = A1/A2` with `A2 = 0` → `#DIV/0!`, `A4 = SUM(A1:A2)` → `2`), so
+the Verify v1 summary tests can check that `formula_errors` and
+`recalc_computed` are disjoint buckets.
+
 Per `xl-bench/README.md`: this harness's real oracle corpus is
 proprietary and never committed — these fixtures are the opposite of that:
 small, synthetic, Apache-2.0-licensed files whose entire contents are

@@ -64,7 +64,9 @@ use xl_graph::{CalcSettings, DepGraph, Step};
 use xl_io::{FormulaKind, Workbook};
 use xl_value::{Array, ErrorKind, RectRange};
 
-use analyze::{WbIndex, collect_precedents, contains_volatile, head_is_subtotal};
+use analyze::{
+    NameScope, ScopedName, WbIndex, collect_precedents, contains_volatile, head_is_subtotal,
+};
 use eval::{ValueStore, eval_expr};
 
 // M2 lane 9 / RFC-0014 §6 (the `wasm-bindgen` dependency policy, condition 4): the parallel
@@ -89,6 +91,26 @@ pub use xl_value::{SheetId, Value};
 /// A formula cell's compiled program: either a parsed AST or the reason it
 /// could not be parsed (surfaced as `#UNSUPPORTED!` with a diagnostic on every
 /// recalc).
+/// Load-level mirror of Excel's open-time `LET` validation (OXP-200: a
+/// duplicate `LET` parameter — `LET(x,1,x,2,x)` — load-rejects the workbook,
+/// it is **not** a computed error). Returns the refusing [`CellProgram`] if
+/// `expr` contains any `LET` call with a duplicate parameter, else `None`.
+/// Every path that compiles an [`Expr`] into a runnable program (workbook
+/// load, shared-formula expansion, programmatic edit) consults this so the
+/// duplicate never reaches evaluation as a silently-shadowed binding.
+fn duplicate_let_rejection(expr: &Expr) -> Option<CellProgram> {
+    lambda::find_duplicate_let_param(expr).map(|dup| {
+        CellProgram::Unparsed(
+            DiagnosticKind::ParseError,
+            format!(
+                "duplicate LET parameter `{dup}`: Excel load-rejects a workbook \
+                 whose LET re-binds a name (validated at open, OXP-200); \
+                 refusing the cell at load"
+            ),
+        )
+    })
+}
+
 enum CellProgram {
     /// Successfully parsed. The `bool` is the cell's **array-entry** status —
     /// `true` for a legacy CSE array formula (`<f t="array">`,
@@ -180,8 +202,10 @@ pub struct Engine {
     /// case-insensitive lookup and so cannot reproduce the display casing;
     /// [`Engine::sheet_names`] returns a clone of this.
     sheet_names: Vec<String>,
-    /// Workbook defined names (raw, resolved on demand).
-    defined_names: Vec<xl_io::DefinedName>,
+    /// Workbook defined names, scope-translated at load (ECMA-376 §18.2.6:
+    /// `localSheetId` collection indices → engine [`SheetId`]s); bodies stay
+    /// raw and are resolved on demand.
+    defined_names: Vec<ScopedName>,
     /// Compiled formula programs, one per formula cell.
     programs: BTreeMap<CellId, CellProgram>,
     /// Current computed/loaded cell values.
@@ -310,7 +334,36 @@ impl Engine {
         // Retain the original-case display names in tab order; `sheet_ids`
         // above discards case for its lookup keys.
         let sheet_names: Vec<String> = workbook.sheets.iter().map(|s| s.name.clone()).collect();
-        let defined_names = workbook.defined_names.clone();
+        // Translate each defined name's `localSheetId` scope into an engine
+        // `SheetId` (ECMA-376 §18.2.6; lane L2-D). `localSheetId` indexes the
+        // FULL `<sheets>` collection (`Sheet::sheets_index`), which diverges
+        // from the loaded tab order whenever the loader skipped an entry
+        // (chartsheet/dialogsheet/macrosheet/veryHidden no-part sheet) — so
+        // the mapping keys on `sheets_index`, never on the vector position. A
+        // scope index with no loaded sheet becomes `LocalUnmapped`: such a
+        // name can never resolve (its sheet hosts no formulas) and must not
+        // shadow or stand in for a same-named global.
+        let collection_to_tab: BTreeMap<u32, SheetId> = workbook
+            .sheets
+            .iter()
+            .enumerate()
+            .map(|(idx, sheet)| (sheet.sheets_index, SheetId(idx as u32)))
+            .collect();
+        let defined_names: Vec<ScopedName> = workbook
+            .defined_names
+            .iter()
+            .map(|d| ScopedName {
+                name: d.name.clone(),
+                formula: d.formula.clone(),
+                scope: match d.sheet_scope {
+                    None => NameScope::Global,
+                    Some(li) => match collection_to_tab.get(&li) {
+                        Some(&sid) => NameScope::Local(sid),
+                        None => NameScope::LocalUnmapped,
+                    },
+                },
+            })
+            .collect();
         let calc = CalcSettings {
             iterate: workbook.calc_settings.iterate,
             max_iters: workbook.calc_settings.iterate_count,
@@ -372,6 +425,15 @@ impl Engine {
                     };
                     match &raw.text {
                         Some(text) => match xl_ast::parse(text) {
+                            // Load-level LET validation (OXP-200): a duplicate
+                            // LET parameter is a load rejection, mirrored per
+                            // cell — never a silently-shadowed binding.
+                            Ok(expr) if duplicate_let_rejection(&expr).is_some() => {
+                                graph.set_deps(cid, &[]);
+                                let p = duplicate_let_rejection(&expr)
+                                    .expect("checked by the guard above");
+                                programs.insert(cid, p);
+                            }
                             Ok(expr) => {
                                 let mut prec = Vec::new();
                                 collect_precedents(&expr, sid, &env, &mut prec);
@@ -425,6 +487,17 @@ impl Engine {
                                 None
                             };
                             match expanded {
+                                // Load-level LET validation applies to an
+                                // expanded follow-on exactly as to its master
+                                // (same compile path — OXP-200).
+                                Some(translated)
+                                    if duplicate_let_rejection(&translated).is_some() =>
+                                {
+                                    graph.set_deps(cid, &[]);
+                                    let p = duplicate_let_rejection(&translated)
+                                        .expect("checked by the guard above");
+                                    programs.insert(cid, p);
+                                }
                                 Some(translated) => {
                                     // Compile exactly like a freshly-parsed
                                     // formula: precedents, volatility, SUBTOTAL
@@ -643,6 +716,16 @@ impl Engine {
             CellInput::Formula(text) => {
                 let src = text.strip_prefix('=').unwrap_or(&text);
                 match xl_ast::parse(src) {
+                    // Load-level LET validation (OXP-200): the programmatic-edit
+                    // compile path rejects a duplicate LET parameter exactly as
+                    // workbook load does.
+                    Ok(expr) if duplicate_let_rejection(&expr).is_some() => {
+                        self.graph.set_deps(cell, &[]);
+                        self.graph.register_volatile(cell, false);
+                        self.subtotals.remove(&cell);
+                        let p = duplicate_let_rejection(&expr).expect("checked by the guard above");
+                        self.programs.insert(cell, p);
+                    }
                     Ok(expr) => {
                         let (prec, volatile) = {
                             let no_spills: BTreeMap<CellId, RectRange> = BTreeMap::new();

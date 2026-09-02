@@ -90,6 +90,18 @@ pub struct Sheet {
     /// zero-based tab-order index; stable across sheet reordering in the
     /// original file but otherwise opaque.
     pub sheet_id: u32,
+    /// This sheet's **0-based position in the workbook's `<sheets>`
+    /// collection** (document order), counting every `<sheet>` entry —
+    /// including the ones the loader skips (chartsheets, dialogsheets,
+    /// macrosheets, and `veryHidden` no-part VBA sheets).
+    ///
+    /// This is the index space `definedName@localSheetId` scopes against
+    /// (ECMA-376 §18.2.6; see [`DefinedName::sheet_scope`]). It equals the
+    /// position in [`Workbook::sheets`] only when
+    /// [`WorkbookFlags::skipped_sheets`] is zero — a skipped `<sheet>` entry
+    /// shifts the two index spaces apart, so scoped-name resolution must key
+    /// on this field, never on the loaded-vector position.
+    pub sheets_index: u32,
     /// Cell storage, keyed by **0-based, inclusive** `(row, col)` — matching
     /// [`xl_value::RectRange`]'s convention — so `"A1"` is `(0, 0)`.
     ///
@@ -292,8 +304,16 @@ pub struct DefinedName {
     /// The raw formula/reference text (no leading `=`).
     pub formula: String,
     /// `Some(local_sheet_id)` for a sheet-scoped name (`localSheetId`
-    /// attribute, a 0-based index into the workbook's sheet list); `None`
-    /// for a workbook-scoped name.
+    /// attribute), `None` for a workbook-scoped name.
+    ///
+    /// Per ECMA-376 §18.2.6 the value is a **0-based index into the
+    /// workbook's `<sheets>` collection** — the index space recorded in
+    /// [`Sheet::sheets_index`], *not* the position in [`Workbook::sheets`]
+    /// (those diverge when the loader skips non-worksheet `<sheet>`
+    /// entries). A sheet-local name is scoped to that one sheet: within its
+    /// sheet it shadows a workbook-scoped name of the same string; other
+    /// sheets see the workbook-scoped one. Name strings are unique per
+    /// scope, not per workbook.
     pub sheet_scope: Option<u32>,
 }
 

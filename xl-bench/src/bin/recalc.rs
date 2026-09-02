@@ -34,6 +34,7 @@ use xl_bench::decline::{DeclineTally, attribute_workbook};
 use xl_bench::diff::DiffConfig;
 use xl_bench::html::workbook_report_to_html;
 use xl_bench::json::{CorpusEntryResult, workbook_report_to_json};
+use xl_bench::l2site::{L2SiteTally, decompose_workbook};
 use xl_bench::mismatch::mine_dir;
 use xl_bench::report::run_workbook;
 use xl_bench::shared_residual::{
@@ -49,6 +50,7 @@ fn main() -> ExitCode {
         Some("tier0") => cmd_tier0(&args[1..]),
         Some("decline-attribution") => cmd_decline_attribution(&args[1..]),
         Some("shared-residual") => cmd_shared_residual(&args[1..]),
+        Some("l2-decomp") => cmd_l2_decomp(&args[1..]),
         Some("mismatch-mine") => cmd_mismatch_mine(&args[1..]),
         Some("cell-hash") => cmd_cell_hash(&args[1..]),
         Some("--help" | "-h") => {
@@ -70,11 +72,12 @@ fn main() -> ExitCode {
 fn print_usage() {
     eprintln!(
         "Usage:\n  \
-         recalc verify <book.xlsx> [--html out.html] [--json out.json] [--quiet]\n  \
+         recalc verify <book.xlsx> [--policy policy.toml] [--baseline baseline.xlsx] [--excel-result result.xlsx --excel-build LABEL] [--html out.html] [--json out.json] [--quiet]\n  \
          recalc verify-dir <dir> [--html-dir out/] [--tol=15sig] [--quiet]\n  \
          recalc tier0 <dir> [--top N] [--dump-mismatch FN1,FN2] [--dump-unsupported FN1,FN2] [--dump-n N] [--tol=15sig] [--quiet]   (INTERNAL Tier-0 fidelity cut)\n  \
          recalc decline-attribution <dir> [--top N] [--dump-cells FILE] [--quiet]   (root-cause classify every #UNSUPPORTED!/#BLOCKED!/#RESOURCE! cell; --dump-cells streams one workbook\\tsheet\\tA1\\tclass line per declined cell)\n  \
          recalc shared-residual <dir> [--top N] [--max-text N] [--quiet]   (dedup unparseable shared-formula MASTER texts blocking follow-on expansion — Lane A triage)\n  \
+         recalc l2-decomp <dir> [--top N] [--example-sites N] [--max-text N] [--quiet]   (refusal-site decomposition of the other_shared_expanded runtime-refusal bucket — L2 triage)\n  \
          recalc mismatch-mine <dir> [--tol=15sig] [--dump FILE] [--top N] [--fn-detail N] [--sample-n N] [--max-text N] [--quiet]   (decompose every Mismatch cell by function / type-transition / pattern; --dump streams per-cell TSV forensics)\n  \
          recalc cell-hash <dir> [--dump FILE] [--self-check] [--quiet]   (serial-vs-parallel sweep: bit-exact per-cell recalc fingerprint; build twice and diff — docs/parallel-sweep.md)\n  \
          (--tol=15sig: the ratified 15-sig-fig float scoring tolerance / M1-gate headline; default is the strict bit-exact floor)\n\n\
@@ -99,6 +102,23 @@ fn flag_value(args: &[String], i: usize, flag: &str) -> Result<PathBuf, String> 
     }
 }
 
+/// Write a machine report without ever leaving a partially truncated target.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.to_path_buf();
+    let suffix = format!(".tmp-{}", std::process::id());
+    let name = tmp
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("report.json");
+    tmp.set_file_name(format!("{name}{suffix}"));
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(tmp, path)
+}
+
 fn fmt_pct(p: Option<f64>) -> String {
     match p {
         Some(x) => format!("{x:.2}%"),
@@ -110,6 +130,10 @@ struct VerifyArgs {
     input: PathBuf,
     html: Option<PathBuf>,
     json: Option<PathBuf>,
+    policy: Option<PathBuf>,
+    baseline: Option<PathBuf>,
+    excel_result: Option<PathBuf>,
+    excel_build: Option<String>,
     quiet: bool,
 }
 
@@ -117,6 +141,10 @@ fn parse_verify_args(args: &[String]) -> Result<VerifyArgs, String> {
     let mut input = None;
     let mut html = None;
     let mut json = None;
+    let mut policy = None;
+    let mut baseline = None;
+    let mut excel_result = None;
+    let mut excel_build = None;
     let mut quiet = false;
     let mut i = 0;
     while i < args.len() {
@@ -128,6 +156,26 @@ fn parse_verify_args(args: &[String]) -> Result<VerifyArgs, String> {
             "--json" => {
                 i += 1;
                 json = Some(flag_value(args, i, "--json")?);
+            }
+            "--policy" => {
+                i += 1;
+                policy = Some(flag_value(args, i, "--policy")?);
+            }
+            "--baseline" => {
+                i += 1;
+                baseline = Some(flag_value(args, i, "--baseline")?);
+            }
+            "--excel-result" => {
+                i += 1;
+                excel_result = Some(flag_value(args, i, "--excel-result")?);
+            }
+            "--excel-build" => {
+                i += 1;
+                excel_build = Some(
+                    flag_value(args, i, "--excel-build")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
             }
             "--quiet" => quiet = true,
             other if input.is_none() && !other.starts_with("--") => {
@@ -142,6 +190,10 @@ fn parse_verify_args(args: &[String]) -> Result<VerifyArgs, String> {
         input,
         html,
         json,
+        policy,
+        baseline,
+        excel_result,
+        excel_build,
         quiet,
     })
 }
@@ -152,9 +204,62 @@ fn cmd_verify(args: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("recalc verify: {e}");
             print_usage();
-            return ExitCode::from(2);
+            return ExitCode::from(64);
         }
     };
+
+    if parsed.excel_result.is_some() != parsed.excel_build.is_some() {
+        eprintln!("recalc verify: --excel-result and --excel-build must be supplied together");
+        return ExitCode::from(64);
+    }
+    let policy = match xl_bench::verify::load_policy(parsed.policy.as_deref()) {
+        Ok((p, _)) => p,
+        Err(e) => {
+            eprintln!("recalc verify: invalid policy: {e}");
+            return ExitCode::from(64);
+        }
+    };
+
+    if parsed.policy.is_some() || parsed.baseline.is_some() || parsed.excel_result.is_some() {
+        let Some(json_path) = parsed.json.as_ref() else {
+            eprintln!("recalc verify: Verify v1 mode requires --json report.json");
+            return ExitCode::from(64);
+        };
+        let result = if let (Some(excel_result), Some(excel_build)) =
+            (&parsed.excel_result, &parsed.excel_build)
+        {
+            xl_bench::verify::run_supplied_excel_verify(
+                &parsed.input,
+                parsed.policy.as_deref(),
+                excel_result,
+                excel_build,
+            )
+        } else {
+            xl_bench::verify::run_verify_v1(
+                &parsed.input,
+                parsed.policy.as_deref(),
+                parsed.baseline.as_deref(),
+            )
+        };
+        let (json, decision) = match result {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("recalc verify: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        if let Err(e) = write_atomic(json_path, json.as_bytes()) {
+            eprintln!(
+                "recalc verify: failed to write JSON report to {}: {e}",
+                json_path.display()
+            );
+            return ExitCode::from(64);
+        }
+        if !parsed.quiet {
+            println!("{}: {:?}", parsed.input.display(), decision);
+        }
+        return ExitCode::from(decision.exit_code());
+    }
 
     let report = match run_workbook(&parsed.input, DiffConfig::default()) {
         Ok(r) => r,
@@ -201,6 +306,13 @@ fn cmd_verify(args: &[String]) -> ExitCode {
 
     if report.summary.has_mismatch() {
         ExitCode::from(1)
+    } else if parsed.policy.is_some()
+        && policy.require_comparison
+        && (report.summary.engine_unsupported > 0 || report.summary.no_oracle > 0)
+    {
+        // Legacy reports cannot distinguish every v1 refusal category yet,
+        // so an explicit policy never permits an unscored PASS.
+        ExitCode::from(2)
     } else {
         ExitCode::from(0)
     }
@@ -805,6 +917,136 @@ fn cmd_shared_residual(args: &[String]) -> ExitCode {
     // the numbers that matter.
     print!("{}", tally.render(parsed.top, parsed.max_text));
     println!("{}", tally.summary_line());
+    ExitCode::from(0)
+}
+
+struct L2DecompArgs {
+    dir: PathBuf,
+    top: usize,
+    example_sites: usize,
+    /// Truncate each example formula to this many bytes (0 = full text).
+    max_text: usize,
+    quiet: bool,
+}
+
+fn parse_l2_decomp_args(args: &[String]) -> Result<L2DecompArgs, String> {
+    let mut dir = None;
+    let mut top = 60usize;
+    let mut example_sites = 10usize;
+    let mut max_text = 240usize;
+    let mut quiet = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--top" => {
+                i += 1;
+                top = args
+                    .get(i)
+                    .ok_or("--top requires a value")?
+                    .parse::<usize>()
+                    .map_err(|_| "--top requires a non-negative integer".to_string())?;
+            }
+            "--example-sites" => {
+                i += 1;
+                example_sites = args
+                    .get(i)
+                    .ok_or("--example-sites requires a value")?
+                    .parse::<usize>()
+                    .map_err(|_| "--example-sites requires a non-negative integer".to_string())?;
+            }
+            "--max-text" => {
+                i += 1;
+                max_text = args
+                    .get(i)
+                    .ok_or("--max-text requires a value")?
+                    .parse::<usize>()
+                    .map_err(|_| "--max-text requires a non-negative integer".to_string())?;
+            }
+            "--quiet" => quiet = true,
+            other if dir.is_none() && !other.starts_with("--") => {
+                dir = Some(PathBuf::from(other));
+            }
+            other => return Err(format!("unrecognized argument: {other}")),
+        }
+        i += 1;
+    }
+    let dir = dir.ok_or("missing <dir> argument")?;
+    Ok(L2DecompArgs {
+        dir,
+        top,
+        example_sites,
+        max_text,
+        quiet,
+    })
+}
+
+/// `recalc l2-decomp <dir>` — L2 triage. Decompose the
+/// `other_shared_expanded` sub-bucket (would-expand shared follow-ons that
+/// refuse at runtime with no static cause) into a ranked refusal-site table:
+/// own engine diagnostics first, else a sentinel-flow trace to the refusing
+/// root (see [`xl_bench::l2site`]). Always exits `0` on a completed run
+/// (this is a measurement, not a pass/fail gate) — except on a partition
+/// failure, which exits `2` rather than report a non-reconciling table.
+fn cmd_l2_decomp(args: &[String]) -> ExitCode {
+    let parsed = match parse_l2_decomp_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("recalc l2-decomp: {e}");
+            print_usage();
+            return ExitCode::from(2);
+        }
+    };
+
+    let books = discover_workbooks(&parsed.dir);
+    if books.is_empty() {
+        eprintln!(
+            "recalc l2-decomp: no .xlsx/.xlsm workbooks under {}",
+            parsed.dir.display()
+        );
+        return ExitCode::from(2);
+    }
+
+    let total = books.len();
+    let mut tally = L2SiteTally::default();
+    for (idx, path) in books.iter().enumerate() {
+        let wb_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        match decompose_workbook(path) {
+            Ok(result) => tally.fold(&wb_name, &result),
+            Err(e) => {
+                tally.note_load_failure();
+                if !parsed.quiet {
+                    println!("{}: LOAD FAILURE: {e}", path.display());
+                }
+            }
+        }
+        let done = idx + 1;
+        if !parsed.quiet && (done.is_multiple_of(50) || done == total) {
+            println!("-- {done}/{total} processed");
+        }
+    }
+
+    // Report + summary line print unconditionally so a silent run still emits
+    // the numbers that matter.
+    print!(
+        "{}",
+        tally.render(parsed.top, parsed.example_sites, parsed.max_text)
+    );
+    println!("{}", tally.summary_line());
+
+    // Release-safe partition gate (mirrors decline-attribution): the per-site
+    // counts must sum to the L2 total, or the table does not reconcile.
+    let site_sum: usize = tally.site_cells.values().sum();
+    if site_sum != tally.total_l2 {
+        eprintln!(
+            "recalc l2-decomp: FATAL: per-site counts sum to {site_sum} but the L2 total is {} — \
+             the site attribution is not a partition; refusing to report a non-reconciling table",
+            tally.total_l2
+        );
+        return ExitCode::from(2);
+    }
     ExitCode::from(0)
 }
 

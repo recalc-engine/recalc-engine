@@ -1,0 +1,14 @@
+# Safe defaults for the local cached-value verification path.
+policy_version = "recalc.verify.policy/v1"
+on_unsupported = "fallback"
+on_blocked = "fallback"
+on_resource_limit = "fallback"
+on_parse_error = "fallback"
+on_formula_error = "fail"
+on_external_reference = "fallback"
+on_vba_project = "fallback"
+require_comparison = true
+require_excel_result = false
+require_determinism = true
+allow_stored_value_match = true
+allow_baseline_match = true

@@ -166,3 +166,70 @@ fn cli_verify_exits_0_when_nothing_is_wrong() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn cli_verify_policy_mode_emits_v1_report_and_requires_json() {
+    let bin = env!("CARGO_BIN_EXE_recalc");
+    let policy =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verify-policy.toml");
+    let tmp = std::env::temp_dir().join(format!("xl-bench-v1-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = tmp.join("report.json");
+    let output = std::process::Command::new(bin)
+        .args(["verify"])
+        .arg(fixture_path())
+        .args(["--policy"])
+        .arg(policy)
+        .args(["--json"])
+        .arg(&out)
+        .arg("--quiet")
+        .output()
+        .expect("recalc binary runs");
+    assert_eq!(output.status.code(), Some(1));
+    let json = std::fs::read_to_string(&out).unwrap();
+    assert!(json.contains("\"schema_version\":\"recalc.verify.report/v1\""));
+    assert!(json.contains("\"candidate_sha256\":\""));
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+#[test]
+fn cli_verify_accepts_identified_excel_result() {
+    let bin = env!("CARGO_BIN_EXE_recalc");
+    let policy =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verify-policy.toml");
+    let tmp = std::env::temp_dir().join(format!("xl-bench-excel-v1-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = tmp.join("report.json");
+    let output = std::process::Command::new(bin)
+        .args(["verify"])
+        .arg(fixture_path())
+        .args(["--excel-result"])
+        .arg(fixture_path())
+        .args(["--excel-build", "16.0.12345.20000", "--policy"])
+        .arg(policy)
+        .args(["--json"])
+        .arg(&out)
+        .arg("--quiet")
+        .output()
+        .expect("recalc binary runs");
+    assert_eq!(output.status.code(), Some(1));
+    let json = std::fs::read_to_string(&out).unwrap();
+    assert!(json.contains("supplied_excel_result_sha256"));
+    assert!(json.contains("16.0.12345.20000"));
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+/// Exit code 64 (`USAGE`, `docs/specs/recalc-verify-v1.md` §3): invalid
+/// arguments claim no verification decision, so they must not reuse the
+/// `FALLBACK` code 2 that a load failure legitimately returns.
+#[test]
+fn cli_verify_exits_64_on_invalid_arguments() {
+    let bin = env!("CARGO_BIN_EXE_recalc");
+    let output = std::process::Command::new(bin)
+        .arg("verify")
+        .arg("--quiet")
+        .output()
+        .expect("recalc binary runs");
+    assert_eq!(output.status.code(), Some(64));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("missing <book.xlsx>"));
+}

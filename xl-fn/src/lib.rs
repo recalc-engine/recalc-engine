@@ -2104,10 +2104,14 @@ mod tests {
         );
     }
 
-    // RFC 0001 / OXP-104: a Blank lookup_value over a whole column defers loudly
-    // (it would match absent rows the populated-cells walk cannot see).
+    // RFC 0001 / OXP-104 H3 (RUN-2026-07-11-oracle01, updated by L2-A): a Blank
+    // lookup_value over a whole column whose populated cells are all confirmed
+    // no-matches is pinned to #N/A — OXP-104 also pins that a Blank key matches
+    // no truly-blank (absent) row, so the invisible rows cannot hide a match.
+    // (The pre-L2-A blanket defer here was an extra-conservative engine policy,
+    // not the oracle answer.)
     #[test]
-    fn vlookup_whole_column_blank_lookup_defers() {
+    fn vlookup_whole_column_blank_lookup_no_match_is_na() {
         assert_eq!(
             call(
                 "VLOOKUP",
@@ -2118,7 +2122,7 @@ mod tests {
                     TestArg::Scalar(Value::Bool(false)),
                 ]
             ),
-            Value::Error(ErrorKind::Unsupported)
+            Value::Error(ErrorKind::Na)
         );
     }
 
@@ -2969,9 +2973,13 @@ mod tests {
         );
     }
 
-    // RFC 0001 / OXP-104: a Blank lookup_value over a whole column defers.
+    // RFC 0001 / OXP-104 H1 (RUN-2026-07-11-oracle01, updated by L2-A): a Blank
+    // lookup_value over a whole column whose populated cells are all confirmed
+    // no-matches is pinned to #N/A (`=MATCH(C1,A:A,0)` over {1,2,<blank>,4} →
+    // #N/A); the pre-L2-A blanket defer was engine policy, not the oracle
+    // answer.
     #[test]
-    fn match_whole_column_blank_lookup_defers() {
+    fn match_whole_column_blank_lookup_no_match_is_na() {
         assert_eq!(
             call(
                 "MATCH",
@@ -2981,7 +2989,7 @@ mod tests {
                     TestArg::Scalar(num(0.0)),
                 ]
             ),
-            Value::Error(ErrorKind::Unsupported)
+            Value::Error(ErrorKind::Na)
         );
     }
 

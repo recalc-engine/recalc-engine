@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:recalc:verify-receipt-manifest:v1",
+  "title": "Recalc Verify receipt manifest v1",
+  "type": "object",
+  "required": ["schema_version", "run_id", "excel_build", "corpus_manifest_sha256", "reports", "report_count", "decisions", "refusal_counts"],
+  "properties": {
+    "schema_version": {"const": "recalc.verify.receipt-manifest/v1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "excel_build": {"type": "string", "minLength": 1},
+    "corpus_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reports": {"type": "array", "items": {"type": "object", "required": ["path", "bytes", "sha256"], "properties": {"path": {"type": "string"}, "bytes": {"type": "integer", "minimum": 0}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}},
+    "report_count": {"type": "integer", "minimum": 0},
+    "decisions": {"type": "object"},
+    "refusal_counts": {"type": "object"}
+  }
+}

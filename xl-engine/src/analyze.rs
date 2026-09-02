@@ -5,10 +5,19 @@
 //! # Provenance
 //! Reference geometry (A1 addressing, whole-column/row ranges, sheet-qualified
 //! and 3-D prefixes) follows the AST shapes `xl-ast` produces (ECMA-376 §18.17).
-//! What this module deliberately does **not** resolve — and returns as
-//! `#UNSUPPORTED!` / no-precedent rather than guessing — is documented per
-//! function: R1C1 (the engine parses in A1 mode), 3-D spans, per-endpoint
-//! sheet-qualified ranges, and non-simple defined names.
+//! Defined-name scope resolution follows ECMA-376 §18.2.6
+//! (`definedName@localSheetId`): a name with `localSheetId="N"` is scoped to
+//! the sheet at 0-based position N of the `<sheets>` collection (name strings
+//! are unique per scope, not per workbook); resolved from that sheet it
+//! shadows a workbook-global name of the same string, while every other sheet
+//! sees the global (corpus shape: a sheet-local `rate`/`X` name shadowing a
+//! global one). What this module deliberately does **not**
+//! resolve — and returns as `#UNSUPPORTED!` / no-precedent rather than
+//! guessing — is documented per function: R1C1 (the engine parses in A1
+//! mode), 3-D spans, per-endpoint sheet-qualified ranges, non-simple
+//! defined-name bodies, and **sheet-qualified name references**
+//! (`Sheet2!name`): §18.2.6 pins storage scoping only, not which scope a
+//! qualified reference selects — an oracle confirmation probe is pending.
 //!
 //! # Recursion is bounded
 //! Every walk here recurses over a *single formula's* AST, which `xl-ast` caps
@@ -21,7 +30,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use xl_ast::{BinaryOp, Expr, ExprKind, NameRef, RefKind, Reference, SheetRef};
 use xl_fn::is_volatile;
 use xl_graph::{CellId, Precedent, SheetRange};
-use xl_io::DefinedName;
 use xl_value::{RectRange, SheetId};
 
 // `RectRange` is used both for reference geometry (above) and, via the
@@ -32,13 +40,47 @@ pub(crate) const MAX_ROW0: u32 = 1_048_575;
 /// Largest 0-based column index (Excel's 16,384 columns, `XFD`).
 pub(crate) const MAX_COL0: u32 = 16_383;
 
+/// The scope a defined name applies to, translated into engine sheet ids at
+/// load (ECMA-376 §18.2.6 `definedName@localSheetId`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NameScope {
+    /// No `localSheetId`: visible from every sheet unless shadowed by a
+    /// same-named [`NameScope::Local`] on the resolving sheet.
+    Global,
+    /// `localSheetId` mapped to a loaded sheet: visible from that sheet only,
+    /// where it shadows a same-named global.
+    Local(SheetId),
+    /// `localSheetId` pointed at a `<sheets>` entry the loader skipped
+    /// (chartsheet/dialogsheet/macrosheet/veryHidden no-part sheet) or out of
+    /// range. The scope sheet hosts no loaded formulas, so this name matches
+    /// **nowhere** — it must neither shadow nor stand in for a global.
+    LocalUnmapped,
+}
+
+/// A defined name after load-time scope translation: the raw
+/// [`xl_io::DefinedName`] with its `localSheetId` (an index into the full
+/// `<sheets>` collection, [`xl_io::Sheet::sheets_index`]) rewritten into a
+/// [`NameScope`] over engine [`SheetId`]s — the two index spaces diverge
+/// whenever the loader skipped a `<sheet>` entry.
+#[derive(Clone, Debug)]
+pub(crate) struct ScopedName {
+    /// The name as declared (matching is ASCII-case-insensitive).
+    pub name: String,
+    /// The raw body text (no leading `=`), parsed lazily at resolution.
+    pub formula: String,
+    /// Which sheet(s) may resolve this name.
+    pub scope: NameScope,
+}
+
 /// Workbook-level lookup tables the analyzer and evaluator share: sheet name →
 /// id (ASCII-lowercased keys) and the defined-name list.
 pub(crate) struct WbIndex<'a> {
     /// ASCII-lowercased sheet name → its [`SheetId`] (the 0-based tab index).
     pub sheet_ids: &'a BTreeMap<String, SheetId>,
-    /// Workbook defined names (sheet-scoped ones are ignored in v0).
-    pub defined_names: &'a [DefinedName],
+    /// Defined names with load-translated scopes (ECMA-376 §18.2.6): resolution
+    /// prefers a [`NameScope::Local`] match on the resolving sheet, then falls
+    /// back to [`NameScope::Global`]. See [`resolve_name`].
+    pub defined_names: &'a [ScopedName],
     /// Cells whose own formula head is a `SUBTOTAL` call (RFC 0002). Consulted
     /// only by the evaluator's provenance-tagged cell walk
     /// (`EngineArgs::for_each_cell_tagged`) so `SUBTOTAL` can exclude nested
@@ -185,16 +227,41 @@ pub(crate) fn rect_is_single(rect: &RectRange) -> bool {
 /// Resolve a defined name to its underlying reference expression, if it is a
 /// **simple** reference or range.
 ///
-/// v0 accepts only workbook-scoped names whose formula parses to a lone
-/// reference or a `ref:ref` range (parentheses stripped). Anything else — a
-/// computed name, a constant, a name-of-a-name, a sheet-scoped name — yields
-/// `None`, so the caller produces `#UNSUPPORTED!` rather than guessing. This
-/// also prevents unbounded name→name recursion (only a bare ref is accepted).
-pub(crate) fn resolve_name(name: &NameRef, env: &WbIndex) -> Option<Expr> {
+/// # Scope (ECMA-376 §18.2.6, lane L2-D)
+/// An **unqualified** name resolved from sheet `cur` prefers a name scoped
+/// locally to `cur` ([`NameScope::Local`]), then falls back to a
+/// workbook-global one — the sheet-local name shadows the global within its
+/// sheet, and every other sheet sees the global. Within one scope the first
+/// declaration in document order wins (§18.2.6 requires per-scope uniqueness,
+/// so a duplicate only occurs in a malformed file; taking the first is
+/// deterministic). A [`NameScope::LocalUnmapped`] name (scoped to a skipped
+/// `<sheets>` entry) matches nowhere.
+///
+/// A **sheet-qualified** name reference (`Sheet2!name`) yields `None`
+/// unconditionally: §18.2.6 pins how names are *stored and scoped*, not which
+/// scope a qualified reference selects, so the engine refuses loudly instead
+/// of guessing (previously the qualifier was silently ignored and the global
+/// served — a silent-wrong risk). An oracle confirmation probe is pending.
+///
+/// # Body (unchanged from v0)
+/// Only a body that parses to a lone reference or a `ref:ref` range
+/// (parentheses stripped) is served. Anything else — a computed name, a
+/// constant, a name-of-a-name — yields `None`, so the caller produces
+/// `#UNSUPPORTED!` rather than guessing. This also prevents unbounded
+/// name→name recursion (only a bare ref is accepted).
+pub(crate) fn resolve_name(name: &NameRef, cur: SheetId, env: &WbIndex) -> Option<Expr> {
+    if name.sheet.is_some() {
+        return None;
+    }
     let dn = env
         .defined_names
         .iter()
-        .find(|d| d.sheet_scope.is_none() && d.name.eq_ignore_ascii_case(&name.name))?;
+        .find(|d| d.scope == NameScope::Local(cur) && d.name.eq_ignore_ascii_case(&name.name))
+        .or_else(|| {
+            env.defined_names
+                .iter()
+                .find(|d| d.scope == NameScope::Global && d.name.eq_ignore_ascii_case(&name.name))
+        })?;
     let mut expr = xl_ast::parse(&dn.formula).ok()?;
     // Strip a single layer of grouping parentheses.
     while let ExprKind::Paren(inner) = expr.kind {
@@ -238,7 +305,7 @@ pub(crate) fn collect_precedents(
             }
         }
         ExprKind::Name(n) => {
-            if let Some(resolved) = resolve_name(n, env) {
+            if let Some(resolved) = resolve_name(n, cur, env) {
                 collect_precedents(&resolved, cur, env, out);
             }
         }

@@ -1,0 +1,11 @@
+{
+  "protocol_version": "recalc.verify.agent-workflow/v1",
+  "run_id": "fixture-v1",
+  "task_set_sha256": "fixture-only",
+  "arms": [
+    {"name": "no_gate", "tasks": [{"id": "t1", "submitted": true, "formula_error": true, "corrected": false, "latency_ms": 100}]},
+    {"name": "diagnostic_retry", "tasks": [{"id": "t1", "submitted": true, "formula_error": false, "corrected": true, "latency_ms": 150, "verify_decision": "fail"}]},
+    {"name": "hard_gate_fallback", "tasks": [{"id": "t1", "submitted": false, "formula_error": false, "corrected": false, "latency_ms": 170, "verify_decision": "fallback"}]}
+  ],
+  "note": "Synthetic fixture; not an independent evaluation or product claim."
+}

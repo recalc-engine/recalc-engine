@@ -87,7 +87,14 @@
 //! (`#UNSUPPORTED!`); this pre-existing contiguity guard is conservative but
 //! left as-is (unrelated to and unaffected by the `exact_eq` scoping above —
 //! see that module's own docs for why an absent row cannot actually hide an
-//! extra match). In the sorted-array modes (`match_type = 1`/`-1`) the
+//! extra match). A `Blank`-key exact scan that **completes with no match**
+//! returns `#N/A` (used-extent clamp): **OXP-104 H1**
+//! pins `MATCH(<blank>, A:A, 0)` over the whole column `{1, 2, <truly
+//! blank>, 4}` to `#N/A`, and the blank-vs-blank NoMatch pin means the
+//! absent rows are confirmed no-matches — the used-extent answer equals the
+//! bounded walk's. Unpinned `Blank` pairs met mid-scan still Defer first,
+//! bit-for-bit unchanged; an entirely EMPTY whole column with a `Blank` key
+//! still defers (never probed). In the sorted-array modes (`match_type = 1`/`-1`) the
 //! treatment of blank cells interspersed in the column is unverified
 //! (OXP-104), so a `Blank` key there still defers — and, as of this fix,
 //! **uniformly** so: [`ascending_search`]/[`descending_search`] now refuse
@@ -208,11 +215,13 @@ fn search(flat: &[Value], match_type: f64, lookup: &Value) -> Result<Option<usiz
 /// A `Blank` `lookup_value` is answerable only in **exact** mode (OXP-165: a
 /// blank key matches a `0`-valued cell, and — unlike the raw operator
 /// contract — does *not* match a truly-`Blank` cell, OXP-104; see
-/// [`crate::lookup::exact_eq`]). Even there it is trusted only when no
-/// *absent* row precedes the match (`rels[i] == i`) — a pre-existing,
+/// [`crate::lookup::exact_eq`]). A `Blank`-key match is trusted only when no
+/// *absent* row precedes it (`rels[i] == i`) — a pre-existing,
 /// extra-conservative guard kept as-is (not required by OXP-104 itself,
 /// which already rules out a Blank key matching *any* blank cell, absent or
-/// populated). In the sorted-array modes (`match_type = 1`/`-1`) a `Blank`
+/// populated). A `Blank`-key exact scan that completes with **no match**
+/// returns `#N/A` — pinned directly by OXP-104 H1 (L2-A; see the arm's
+/// comment). In the sorted-array modes (`match_type = 1`/`-1`) a `Blank`
 /// key still defers (OXP-104: the treatment of blank cells interspersed in a
 /// sorted column is unverified) — no local pre-check is needed for that here,
 /// though, since [`ascending_search`]/[`descending_search`]'s general
@@ -222,9 +231,11 @@ fn match_used_extent(rows: Vec<(u32, Vec<Value>)>, match_type: f64, lookup: &Val
     let is_blank_lookup = matches!(lookup, Value::Blank);
     let width = rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0);
     if width == 0 {
-        // No populated rows. A non-blank key has nothing to match (#N/A); for
-        // a Blank key, keep the pre-existing extra-conservative defer here
-        // too (unchanged, out of scope for this fix).
+        // No populated rows. A non-blank key has nothing to match (#N/A). A
+        // Blank key still defers — kept bit-for-bit (L2-A condition 2): unlike
+        // the populated no-match case (pinned by OXP-104 H1), an ENTIRELY
+        // empty column was never probed, so #N/A would rest on composing the
+        // blank-vs-blank NoMatch pair alone.
         return if is_blank_lookup {
             Value::Error(ErrorKind::Unsupported)
         } else {
@@ -257,9 +268,17 @@ fn match_used_extent(rows: Vec<(u32, Vec<Value>)>, match_type: f64, lookup: &Val
             // positions), not the compacted index (OXP-104).
             Value::number((rels[i] + 1) as f64)
         }
-        // Same pre-existing, extra-conservative guard for the no-match case
-        // (unchanged): keep deferring rather than claim #N/A here.
-        Ok(None) if is_blank_lookup => Value::Error(ErrorKind::Unsupported),
+        // No-match completion → #N/A, Blank key included (L2-A). Pinned, not
+        // composed: OXP-104 H1 (RUN-2026-07-11-oracle01) observed
+        // `MATCH(C1, A:A, 0)` with C1 blank over the whole column
+        // {1, 2, <truly blank>, 4} → `#N/A`. Reaching this arm means every
+        // populated cell was a confirmed NoMatch (any unpinned pair Defers →
+        // `Err(k)` below, preserved bit-for-bit), and OXP-104 pins that a
+        // Blank key matches no truly-blank (absent) cell — so the completed
+        // scan's #N/A equals the already-pinned bounded walk's answer. (Until
+        // this change the Blank-key case carried an extra-conservative defer —
+        // the L2-A corpus refusal.) The sorted modes never reach here with a
+        // Blank involved: the touch-a-Blank defer fires first.
         Ok(None) => Value::Error(ErrorKind::Na),
         Err(k) => Value::Error(k),
     }
@@ -457,6 +476,55 @@ mod tests {
                 vec![
                     Scalar(Value::Blank),
                     UsedRows(vec![(2, vec![num(0.0)])]),
+                    Scalar(num(0.0)),
+                ],
+            ),
+            Value::Error(ErrorKind::Unsupported)
+        );
+    }
+
+    /// OXP-104 (H1, RUN-2026-07-11-oracle01) — the used-extent view of OXP-104's
+    /// own whole-column fixture `A = {1, 2, <truly blank>, 4}`:
+    /// `MATCH(C1, A:A, 0)` with C1 blank is pinned to **`#N/A`**. Every
+    /// populated cell is a confirmed NoMatch (non-zero numbers) and the absent
+    /// row is a truly-blank cell, pinned NoMatch for a Blank key — so the
+    /// completed exact scan's `#N/A` is fully determined by pinned facts, same
+    /// as the bounded walk already answers
+    /// (`oxp104_blank_key_over_bounded_array_no_zero_element_is_na`). L2-A.
+    #[test]
+    fn oxp104_blank_key_no_match_over_whole_column_is_na() {
+        assert_eq!(
+            eval_direct(
+                eval,
+                vec![
+                    Scalar(Value::Blank),
+                    UsedRows(vec![
+                        (0, vec![num(1.0)]),
+                        (1, vec![num(2.0)]),
+                        (3, vec![num(4.0)])
+                    ]),
+                    Scalar(num(0.0)),
+                ],
+            ),
+            Value::Error(ErrorKind::Na)
+        );
+    }
+
+    /// PRESERVED bit-for-bit (L2-A condition 2): an unpinned Defer *pair* met
+    /// mid-scan — a populated `""` cell against a Blank key (OXP-171 queued) —
+    /// still aborts the whole-column exact scan with `#UNSUPPORTED!`.
+    #[test]
+    fn blank_key_whole_column_with_empty_text_cell_still_defers() {
+        assert_eq!(
+            eval_direct(
+                eval,
+                vec![
+                    Scalar(Value::Blank),
+                    UsedRows(vec![
+                        (0, vec![num(1.0)]),
+                        (1, vec![txt("")]),
+                        (3, vec![num(4.0)])
+                    ]),
                     Scalar(num(0.0)),
                 ],
             ),

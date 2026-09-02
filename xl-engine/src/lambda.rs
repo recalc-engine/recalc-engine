@@ -10,13 +10,18 @@
 //! [`crate::eval`] next to the evaluator.
 //!
 //! # Provenance
-//! Semantics pinned by the oracle farm: **OXP-200** (LET scoping, closure
-//! capture `LET(x,5,LAMBDA(y,x+y))(10)=15`, arity over/under → `#VALUE!`, bare
-//! lambda in a cell → `#CALC!`), **OXP-201** (array broadcasting), **OXP-207**
-//! (MAP element-wise + positional zip; SCAN output shape; BYROW→column /
-//! BYCOL→row vectors; MAKEARRAY 1-based indices). The lambda value shape is
-//! RFC-0012 §2 (BC-2/BC-3) and the §10 amendment (production constructor +
-//! `LambdaObj` downcast).
+//! Semantics pinned by the oracle farm: **OXP-199** (authoring rule —
+//! `_xlfn.` on the functions, mandatory `_xlpm.` on parameter names; function
+//! breadth), **OXP-200** (LET scoping, closure capture
+//! `LET(x,5,LAMBDA(y,x+y))(10)=15`, arity over/under → `#VALUE!`, bare lambda
+//! in a cell → `#CALC!`, duplicate LET parameter → **load-rejected**, mirrored
+//! by `duplicate_let_rejection` in `lib.rs`), **OXP-201** (array
+//! broadcasting), **OXP-203** (a lambda-valued *array element* in a spill →
+//! `#VALUE!` element-wise — distinct from the bare-lambda `#CALC!`; enforced in
+//! `write_cell_result`), **OXP-207** (MAP element-wise + positional zip; SCAN
+//! output shape; BYROW→column / BYCOL→row vectors; MAKEARRAY 1-based indices).
+//! The lambda value shape is RFC-0012 §2 (BC-2/BC-3) and the §10 amendment
+//! (production constructor + `LambdaObj` downcast).
 //!
 //! # Scoping model (RFC-0012 §8 forward note)
 //! A [`Closure`] captures its **definition-time** environment (a snapshot of the
@@ -150,4 +155,84 @@ pub(crate) fn make_lambda(
 /// refuses instead of panicking.
 pub(crate) fn downcast_closure(lambda: &Lambda) -> Option<&Closure> {
     lambda.obj().as_any().downcast_ref::<Closure>()
+}
+
+/// Scan one `LET` call's argument list for a duplicate parameter name and
+/// return the first duplicate (canonical, prefix-stripped) if any.
+///
+/// Excel **load-rejects** a workbook whose `LET` re-binds a parameter
+/// (`LET(x,1,x,2,x)` — OXP-200: validated at open, not a computed error), so
+/// the engine mirrors it as a load/compile-level rejection; this helper is the
+/// shared detector. The binding-name slots are every second argument while a
+/// `(name, value)` pair remains (the trailing single argument is the
+/// calculation). Only [`ExprKind::Name`] slots participate — a malformed
+/// non-name slot is a separate eval-time refusal. Duplicates are judged on the
+/// canonical name ([`canon_name`]): case-insensitive, `_xlpm.`-stripped.
+/// Shadowing across *nested* `LET`s is NOT a duplicate (ordinary lexical
+/// shadowing) — callers apply this to one call's own `args` only.
+pub(crate) fn duplicate_let_binding(args: &[xl_ast::Expr]) -> Option<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut rest = args;
+    while let [name_expr, _value, tail @ ..] = rest {
+        if !tail.is_empty()
+            && let xl_ast::ExprKind::Name(nr) = &peel_paren_ast(name_expr).kind
+        {
+            let key = canon_name(&nr.name);
+            if seen.contains(&key) {
+                return Some(key);
+            }
+            seen.push(key);
+        }
+        rest = tail;
+    }
+    None
+}
+
+/// Like `eval::peel_paren` but local to this module (the `eval` one is private
+/// to its module): strip [`ExprKind::Paren`] wrappers.
+fn peel_paren_ast(e: &xl_ast::Expr) -> &xl_ast::Expr {
+    let mut cur = e;
+    while let xl_ast::ExprKind::Paren(inner) = &cur.kind {
+        cur = inner;
+    }
+    cur
+}
+
+/// Walk a whole parsed formula and return the first duplicate `LET` parameter
+/// name found in ANY `LET` call in the tree, or `None`.
+///
+/// This is the load/compile-level mirror of Excel's open-time validation
+/// (OXP-200: duplicate `LET` param → workbook load-rejected): every path that
+/// compiles an [`Expr`] into a runnable cell program calls this and refuses the
+/// cell loudly (ParseError-kind diagnostic + `#UNSUPPORTED!`) on a hit, so the
+/// duplicate never reaches evaluation as a silently-shadowed binding.
+/// Recursion is bounded by `xl-ast`'s nesting cap (see `analyze.rs` header).
+pub(crate) fn find_duplicate_let_param(expr: &Expr) -> Option<String> {
+    use xl_ast::ExprKind;
+    match &expr.kind {
+        ExprKind::Call { name, args } => {
+            if name.canonical == "LET"
+                && let Some(dup) = duplicate_let_binding(args)
+            {
+                return Some(dup);
+            }
+            args.iter().find_map(find_duplicate_let_param)
+        }
+        ExprKind::Unary { expr, .. }
+        | ExprKind::Postfix { expr, .. }
+        | ExprKind::Paren(expr)
+        | ExprKind::ImplicitIntersection(expr) => find_duplicate_let_param(expr),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            find_duplicate_let_param(lhs).or_else(|| find_duplicate_let_param(rhs))
+        }
+        ExprKind::Array(rows) => rows.iter().flatten().find_map(find_duplicate_let_param),
+        ExprKind::Number(_)
+        | ExprKind::Text(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Error(_)
+        | ExprKind::Missing
+        | ExprKind::Ref(_)
+        | ExprKind::Name(_)
+        | ExprKind::Unsupported { .. } => None,
+    }
 }

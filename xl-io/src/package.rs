@@ -115,7 +115,7 @@ fn build_workbook<R: Read + Seek>(
 
     let mut sheets = Vec::with_capacity(wb.sheets.len());
     let mut skipped_sheets: u32 = 0;
-    for meta in &wb.sheets {
+    for (sheets_index, meta) in wb.sheets.iter().enumerate() {
         // Empty/absent `r:id` (`workbook_xml::SheetMeta::r_id` is `None`)
         // means this `<sheet>` has no worksheet part at all — real Excel
         // output for `state="veryHidden"` VBA code/module sheets (Enron
@@ -162,6 +162,11 @@ fn build_workbook<R: Read + Seek>(
         sheets.push(Sheet {
             name: meta.name.clone(),
             sheet_id: meta.sheet_id,
+            // Position in the full `<sheets>` collection (skipped entries
+            // included) — the `definedName@localSheetId` index space
+            // (ECMA-376 §18.2.6). `sheets_index` enumerates `wb.sheets`,
+            // which holds every `<sheet>` element in document order.
+            sheets_index: sheets_index as u32,
             cells: sheet_data.cells,
             hidden_rows: sheet_data.hidden_rows,
         });

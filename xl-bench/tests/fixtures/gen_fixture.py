@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates `cached_values.xlsx` and `clean_values.xlsx` — tiny,
+"""Generates `cached_values.xlsx`, `clean_values.xlsx`, and `error_values.xlsx` — tiny,
 hand-authored, synthetic fixtures for `xl-bench`'s integration tests
 (`xl-bench/tests/cached_fixture.rs`, `xl-bench/tests/verify_dir.rs`).
 
@@ -89,6 +89,18 @@ CLEAN_SHEET_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </sheetData>
 </worksheet>"""
 
+# One formula error next to one clean formula cell: the Verify v1 summary
+# buckets (`recalc_computed`, `formula_errors`, ...) must stay disjoint.
+ERROR_SHEET_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>
+<row r="1"><c r="A1"><v>2</v></c></row>
+<row r="2"><c r="A2"><v>0</v></c></row>
+<row r="3"><c r="A3" t="e"><f>A1/A2</f><v>#DIV/0!</v></c></row>
+<row r="4"><c r="A4"><f>SUM(A1:A2)</f><v>2</v></c></row>
+</sheetData>
+</worksheet>"""
+
 
 def build(sheet_xml: str) -> bytes:
     import io
@@ -114,6 +126,7 @@ def main() -> int:
     for filename, sheet_xml in [
         ("cached_values.xlsx", CACHED_SHEET_XML),
         ("clean_values.xlsx", CLEAN_SHEET_XML),
+        ("error_values.xlsx", ERROR_SHEET_XML),
     ]:
         out_path = os.path.join(FIXTURE_DIR, filename)
         data = build(sheet_xml)

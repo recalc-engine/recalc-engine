@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:recalc:verify-report:v1",
+  "title": "Recalc Verify report v1",
+  "type": "object",
+  "required": ["schema_version", "decision", "exit_code", "receipt", "summary", "workbook", "cells", "issues"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "recalc.verify.report/v1"},
+    "decision": {"enum": ["pass", "fail", "fallback"]},
+    "exit_code": {"type": "integer", "enum": [0, 1, 2]},
+    "workbook": {
+      "type": "object",
+      "required": ["path", "sha256", "formula_cells", "flags"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "formula_cells": {"type": "integer", "minimum": 0},
+        "flags": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "policy": {"type": "object", "additionalProperties": true},
+    "engine": {
+      "type": "object",
+      "required": ["version", "git_revision", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {"type": "string"},
+        "git_revision": {"type": "string"},
+        "target": {"type": "string"},
+        "os": {"type": "string"}
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "required": ["candidate_sha256", "policy_sha256", "comparison_rules", "determinism", "canonical_payload_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "candidate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "baseline_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "supplied_excel_result_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "policy_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "comparison_rules": {"type": "array", "items": {"type": "string"}},
+        "determinism": {"type": "object", "additionalProperties": true},
+        "canonical_payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "excel_build": {"type": ["string", "null"]}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["formula_cells", "recalc_computed", "formula_errors", "unsupported", "blocked", "resource_limited", "mismatches", "assertion_failures"],
+      "additionalProperties": false,
+      "properties": {
+        "formula_cells": {"type": "integer", "minimum": 0},
+        "recalc_computed": {"type": "integer", "minimum": 0},
+        "formula_errors": {"type": "integer", "minimum": 0},
+        "unsupported": {"type": "integer", "minimum": 0},
+        "blocked": {"type": "integer", "minimum": 0},
+        "resource_limited": {"type": "integer", "minimum": 0},
+        "mismatches": {"type": "integer", "minimum": 0},
+        "assertion_failures": {"type": "integer", "minimum": 0},
+        "evidence_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "cells": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sheet", "ref", "formula", "calculation_outcome", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "sheet": {"type": "string"},
+          "ref": {"type": "string"},
+          "row": {"type": "integer", "minimum": 0},
+          "col": {"type": "integer", "minimum": 0},
+          "formula": {"type": "string"},
+          "calculation_outcome": {"enum": ["recalc_computed", "formula_error", "unsupported", "blocked", "resource_limited", "parse_failed"]},
+          "value": {},
+          "diagnostics": {"type": "array", "items": {"type": "string"}},
+          "evidence": {"type": "array", "items": {"type": "object", "required": ["label", "source"], "additionalProperties": true, "properties": {"label": {"enum": ["matches_stored", "differs_stored", "matches_baseline", "differs_baseline", "matches_supplied_excel", "differs_supplied_excel", "assertion_passed", "assertion_failed", "evidence_unavailable"]}, "source": {"enum": ["cached_value", "baseline", "supplied_excel_result", "assertion"]}}}}
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {"type": "object", "required": ["code", "severity", "message"], "additionalProperties": true, "properties": {"code": {"type": "string"}, "severity": {"enum": ["info", "warning", "error"]}, "message": {"type": "string"}, "sheet": {"type": "string"}, "ref": {"type": "string"}}}
+    }
+  }
+}

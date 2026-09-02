@@ -42,9 +42,188 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use xl_ast::ParseErrorKind;
 use xl_io::FormulaKind;
 
+use crate::decline::has_external_bracket;
 use crate::report::RunError;
+
+/// Coarse syntactic **feature bucket** for one unparseable master formula —
+/// the W-B triage axis (*why* does this master fail to parse?). Derived
+/// deterministically from the [`ParseErrorKind`] plus a raw-text scan of the
+/// master's formula (see [`classify_master`]); purely diagnostic, never fed
+/// back into any engine decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FeatureBucket {
+    /// The lexer rejected a **non-ASCII character** (`UnexpectedChar` outside
+    /// ASCII) — the OXP-211 defined-name family (`º`/`í`, …). After the
+    /// OXP-211 letter widening (`58f0b86`) this fires only for non-letter
+    /// non-ASCII chars still awaiting the deferred COM fill-in probe.
+    NonAsciiChar,
+    /// The raw text carries an **external workbook index** `[n]` (the stored
+    /// form of a cross-workbook reference, `[1]Sheet1!A1`). Not a grammar gap:
+    /// the referenced workbook is not shipped, so the correct outcome is a
+    /// refusal either way.
+    ExternalRef,
+    /// A **structured/table reference** shape (`Table1[Col]`, `[[#Data],…]`,
+    /// `[@Col]`, or an unterminated bracket group).
+    StructuredRef,
+    /// An **array literal** `{…}` the parser rejected (non-constant element or
+    /// ragged rows per ECMA-376 §18.17.2).
+    ArrayLiteral,
+    /// **R1C1-style** reference text (`R[1]C[1]`, `RC[2]`, …) inside a part
+    /// stored in A1 mode — an authoring/converter artifact.
+    R1C1Artifact,
+    /// Anything else — reported under its [`ParseErrorKind`] string, never
+    /// silently folded into a named bucket.
+    OtherParse,
+}
+
+impl FeatureBucket {
+    /// Short, stable machine-readable tag.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            FeatureBucket::NonAsciiChar => "non_ascii_char",
+            FeatureBucket::ExternalRef => "external_ref",
+            FeatureBucket::StructuredRef => "structured_ref",
+            FeatureBucket::ArrayLiteral => "array_literal",
+            FeatureBucket::R1C1Artifact => "r1c1_artifact",
+            FeatureBucket::OtherParse => "other_parse",
+        }
+    }
+}
+
+/// Identifier-character predicate shared by the raw-text scans.
+#[must_use]
+fn is_ident_byte(p: u8) -> bool {
+    p.is_ascii_alphanumeric() || p == b'_' || p == b'.'
+}
+
+/// Whether the bytes ending at `end` (exclusive) form a standalone R1C1 axis
+/// prefix — a lone `R`/`C` (`R[1]`, `C[-2]`) or the relative pair `RC`
+/// (`RC[3]`) — with no identifier character before it (so `VARC[…]` or
+/// `Name.R[…]` do not qualify).
+#[must_use]
+fn is_r1c1_axis_prefix(b: &[u8], end: usize) -> bool {
+    if end == 0 {
+        return false;
+    }
+    let last = b[end - 1];
+    if matches!(last, b'R' | b'r') {
+        return end < 2 || !is_ident_byte(b[end - 2]);
+    }
+    if matches!(last, b'C' | b'c') {
+        // Lone `C[…]`, or the `RC[…]` pair.
+        if end < 2 || !is_ident_byte(b[end - 2]) {
+            return true;
+        }
+        if matches!(b[end - 2], b'R' | b'r') {
+            return end < 3 || !is_ident_byte(b[end - 3]);
+        }
+    }
+    false
+}
+
+/// Whether `text` contains a structured-reference marker: `[#`, `[[`, `[@`,
+/// or a `[` immediately preceded by an identifier character (`Table1[Col]`,
+/// `Name[2024]`). Skips double-quoted string literals, mirroring
+/// [`has_external_bracket`]'s string handling. An R1C1 offset (`R[1]`,
+/// `C[-2]`) also puts an ident char before `[`; a lone `R`/`C` axis letter is
+/// excluded so those shapes stay with [`has_r1c1_artifact`].
+#[must_use]
+fn has_structured_ref_marker(text: &str) -> bool {
+    let b = text.as_bytes();
+    let mut in_str = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' {
+            in_str = !in_str;
+            i += 1;
+            continue;
+        }
+        if !in_str && c == b'[' {
+            if i + 1 < b.len() && matches!(b[i + 1], b'#' | b'[' | b'@') {
+                return true;
+            }
+            if i > 0 && is_ident_byte(b[i - 1]) && !is_r1c1_axis_prefix(b, i) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether `text` contains an R1C1-style reference shape outside string
+/// literals: an `R` or `C` axis letter (not part of a longer identifier)
+/// immediately followed by `[` with a signed-integer offset (`R[1]`, `C[-2]`).
+#[must_use]
+fn has_r1c1_artifact(text: &str) -> bool {
+    let b = text.as_bytes();
+    let mut in_str = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' {
+            in_str = !in_str;
+            i += 1;
+            continue;
+        }
+        if !in_str && c == b'[' && is_r1c1_axis_prefix(b, i) {
+            let mut j = i + 1;
+            if j < b.len() && b[j] == b'-' {
+                j += 1;
+            }
+            let d0 = j;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > d0 && j < b.len() && b[j] == b']' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Classify one unparseable master into its [`FeatureBucket`].
+///
+/// Deterministic precedence (first match wins), sharpest signal first:
+/// 1. a non-ASCII `UnexpectedChar` is unambiguous lexer evidence;
+/// 2. an array-literal `ParseErrorKind` is unambiguous parser evidence;
+/// 3. an R1C1 offset shape (`R[1]`/`C[-2]`) beats the broader bracket scans
+///    (its `[signed-int]` shape is sharper than "some bracket");
+/// 4. an external `[n]` workbook index;
+/// 5. structured-ref bracket shapes;
+/// 6. everything else stays [`FeatureBucket::OtherParse`] under its
+///    `ParseErrorKind` — never guessed into a named bucket.
+#[must_use]
+pub fn classify_master(text: &str, kind: &ParseErrorKind) -> FeatureBucket {
+    if let ParseErrorKind::UnexpectedChar(c) = kind
+        && !c.is_ascii()
+    {
+        return FeatureBucket::NonAsciiChar;
+    }
+    if matches!(
+        kind,
+        ParseErrorKind::NonConstantInArray | ParseErrorKind::RaggedArray
+    ) {
+        return FeatureBucket::ArrayLiteral;
+    }
+    if has_r1c1_artifact(text) {
+        return FeatureBucket::R1C1Artifact;
+    }
+    if has_external_bracket(text) {
+        return FeatureBucket::ExternalRef;
+    }
+    if matches!(kind, ParseErrorKind::UnterminatedBracket) || has_structured_ref_marker(text) {
+        return FeatureBucket::StructuredRef;
+    }
+    FeatureBucket::OtherParse
+}
 
 /// A master cell's text and its cached parse outcome (`None` = parsed OK, `Some`
 /// = the `ParseErrorKind`'s display string). Parsing once per master keeps the
@@ -52,8 +231,20 @@ use crate::report::RunError;
 struct MasterInfo {
     text: String,
     /// `None` if the body parses; else the parse-error *kind* string (span
-    /// dropped, so the same grammatical failure deduplicates cleanly).
-    parse_err: Option<String>,
+    /// dropped, so the same grammatical failure deduplicates cleanly) plus the
+    /// coarse [`FeatureBucket`].
+    parse_err: Option<(String, FeatureBucket)>,
+}
+
+/// One workbook's record for a single unparseable master text.
+#[derive(Clone, Debug)]
+pub struct MasterFailure {
+    /// The `ParseErrorKind` display string.
+    pub parse_error: String,
+    /// The coarse feature bucket ([`classify_master`]).
+    pub bucket: FeatureBucket,
+    /// Follow-on cells this master blocks within the workbook.
+    pub followons: usize,
 }
 
 /// One deduplicated unparseable-master record, in the corpus-wide ranking.
@@ -63,6 +254,8 @@ pub struct FailingMaster {
     pub text: String,
     /// The `ParseErrorKind` display string (the failure class).
     pub parse_error: String,
+    /// The coarse feature bucket ([`classify_master`]).
+    pub bucket: FeatureBucket,
     /// Total follow-on cells this master text blocks across the corpus.
     pub followon_cells: usize,
     /// Distinct workbooks in which this master text failed to parse.
@@ -82,10 +275,10 @@ pub struct WorkbookSharedResidual {
     pub parse_fail_followons: usize,
     /// Bodyless follow-ons carrying no `si` at all (malformed) — cannot be keyed.
     pub malformed_no_si: usize,
-    /// Per unparseable-master **text** → (parse-error string, follow-on count)
-    /// within this one workbook. Folded into the corpus tally with distinct-
-    /// workbook counting.
-    pub fails: BTreeMap<String, (String, usize)>,
+    /// Per unparseable-master **text** → its [`MasterFailure`] record within
+    /// this one workbook. Folded into the corpus tally with distinct-workbook
+    /// counting.
+    pub fails: BTreeMap<String, MasterFailure>,
 }
 
 /// Attribute one workbook's bodyless shared follow-ons (pure, engine-free).
@@ -110,7 +303,9 @@ pub fn attribute_workbook_pure(workbook: &xl_io::Workbook) -> WorkbookSharedResi
             };
             // `sheet.cells` is a BTreeMap, so this iterates in (row, col) order;
             // a later insert overwrites an earlier one, matching the engine.
-            let parse_err = xl_ast::parse(text).err().map(|e| e.kind.to_string());
+            let parse_err = xl_ast::parse(text)
+                .err()
+                .map(|e| (e.kind.to_string(), classify_master(text, &e.kind)));
             masters.insert(
                 (sidx, si),
                 MasterInfo {
@@ -139,13 +334,17 @@ pub fn attribute_workbook_pure(workbook: &xl_io::Workbook) -> WorkbookSharedResi
                 None => out.orphan_missing += 1,
                 Some(mi) => match &mi.parse_err {
                     None => out.would_expand += 1,
-                    Some(err) => {
+                    Some((err, bucket)) => {
                         out.parse_fail_followons += 1;
-                        let entry = out
-                            .fails
-                            .entry(mi.text.clone())
-                            .or_insert_with(|| (err.clone(), 0));
-                        entry.1 += 1;
+                        let entry =
+                            out.fails
+                                .entry(mi.text.clone())
+                                .or_insert_with(|| MasterFailure {
+                                    parse_error: err.clone(),
+                                    bucket: *bucket,
+                                    followons: 0,
+                                });
+                        entry.followons += 1;
                     }
                 },
             }
@@ -171,8 +370,9 @@ pub struct SharedResidualTally {
     pub orphan_missing: usize,
     pub parse_fail_followons: usize,
     pub malformed_no_si: usize,
-    /// text -> (parse-error string, total follow-on cells, distinct workbooks).
-    fails: BTreeMap<String, (String, usize, usize)>,
+    /// text -> (parse-error string, bucket, total follow-on cells, distinct
+    /// workbooks).
+    fails: BTreeMap<String, (String, FeatureBucket, usize, usize)>,
 }
 
 impl SharedResidualTally {
@@ -185,13 +385,13 @@ impl SharedResidualTally {
         self.orphan_missing += r.orphan_missing;
         self.parse_fail_followons += r.parse_fail_followons;
         self.malformed_no_si += r.malformed_no_si;
-        for (text, (err, cnt)) in &r.fails {
+        for (text, mf) in &r.fails {
             let e = self
                 .fails
                 .entry(text.clone())
-                .or_insert_with(|| (err.clone(), 0, 0));
-            e.1 += *cnt;
-            e.2 += 1;
+                .or_insert_with(|| (mf.parse_error.clone(), mf.bucket, 0, 0));
+            e.2 += mf.followons;
+            e.3 += 1;
         }
     }
 
@@ -207,9 +407,10 @@ impl SharedResidualTally {
         let mut v: Vec<FailingMaster> = self
             .fails
             .iter()
-            .map(|(text, (err, cnt, wbs))| FailingMaster {
+            .map(|(text, (err, bucket, cnt, wbs))| FailingMaster {
                 text: text.clone(),
                 parse_error: err.clone(),
+                bucket: *bucket,
                 followon_cells: *cnt,
                 workbooks: *wbs,
             })
@@ -288,7 +489,7 @@ impl SharedResidualTally {
 
         // Parse-error-kind rollup: which grammatical failures dominate.
         let mut by_err: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-        for (err, cnt, _wbs) in self.fails.values() {
+        for (err, _bucket, cnt, _wbs) in self.fails.values() {
             let e = by_err.entry(err.clone()).or_insert((0, 0));
             e.0 += *cnt; // follow-on cells
             e.1 += 1; // distinct master texts
@@ -303,6 +504,27 @@ impl SharedResidualTally {
         );
         for (err, cells, masters) in &err_rank {
             let _ = writeln!(s, "  {cells:>10} cells / {masters:>6} masters   {err}");
+        }
+
+        // Feature-bucket rollup: the W-B coarse-cause ranking.
+        let mut by_bucket: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+        for (_err, bucket, cnt, _wbs) in self.fails.values() {
+            let e = by_bucket.entry(bucket.tag()).or_insert((0, 0));
+            e.0 += *cnt; // follow-on cells
+            e.1 += 1; // distinct master texts
+        }
+        let mut bucket_rank: Vec<(&'static str, usize, usize)> =
+            by_bucket.into_iter().map(|(k, (c, m))| (k, c, m)).collect();
+        bucket_rank.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let _ = writeln!(
+            s,
+            "\n== feature-bucket rollup (follow-on cells / distinct masters) =="
+        );
+        if bucket_rank.is_empty() {
+            let _ = writeln!(s, "  (none)");
+        }
+        for (tag, cells, masters) in &bucket_rank {
+            let _ = writeln!(s, "  {cells:>10} cells / {masters:>6} masters   {tag}");
         }
 
         let ranking = self.ranked_failures();
@@ -326,8 +548,12 @@ impl SharedResidualTally {
             };
             let _ = writeln!(
                 s,
-                "  [{:>7} cells / {:>5} wbs] {} :: ={}",
-                fm.followon_cells, fm.workbooks, fm.parse_error, shown
+                "  [{:>7} cells / {:>5} wbs] [{}] {} :: ={}",
+                fm.followon_cells,
+                fm.workbooks,
+                fm.bucket.tag(),
+                fm.parse_error,
+                shown
             );
         }
         s
@@ -395,6 +621,7 @@ mod tests {
         let sheet = Sheet {
             name: "Sheet1".to_string(),
             sheet_id: 1,
+            sheets_index: 0,
             cells: map,
             hidden_rows: BTreeSet::new(),
         };
@@ -435,8 +662,9 @@ mod tests {
         assert_eq!(r.parse_fail_followons, 2);
         assert_eq!(r.would_expand, 0);
         assert_eq!(r.fails.len(), 1, "one distinct master text");
-        let (_err, cnt) = r.fails.get("SUM(").expect("master text keyed");
-        assert_eq!(*cnt, 2);
+        let mf = r.fails.get("SUM(").expect("master text keyed");
+        assert_eq!(mf.followons, 2);
+        assert_eq!(mf.bucket, FeatureBucket::OtherParse);
     }
 
     #[test]
@@ -454,6 +682,58 @@ mod tests {
         let r = attribute_workbook_pure(&wb);
         assert_eq!(r.malformed_no_si, 1);
         assert_eq!(r.orphan_missing, 0);
+    }
+
+    /// Parse `text`, expecting failure, and classify the failing master.
+    fn bucket_of(text: &str) -> FeatureBucket {
+        let err = xl_ast::parse(text).expect_err("fixture must fail to parse");
+        classify_master(text, &err.kind)
+    }
+
+    #[test]
+    fn classify_non_ascii_unexpected_char() {
+        // `§` (U+00A7, category So — not a letter) is still rejected after the
+        // OXP-211 letter widening.
+        assert_eq!(bucket_of("Total§x+1"), FeatureBucket::NonAsciiChar);
+    }
+
+    #[test]
+    fn classify_external_ref() {
+        // Unquoted `[1]…` external index: lexes to a bracket atom, then trips
+        // a trailing-token parse error — the classic unparsed external form.
+        assert_eq!(bucket_of("[1]Sheet1!A1+B2"), FeatureBucket::ExternalRef);
+    }
+
+    #[test]
+    fn classify_structured_ref() {
+        assert_eq!(
+            bucket_of("SUM(Table1[[#Data],[Amount"),
+            FeatureBucket::StructuredRef
+        );
+    }
+
+    #[test]
+    fn classify_array_literal() {
+        // Ragged rows → RaggedArray.
+        assert_eq!(bucket_of("{1,2;3}"), FeatureBucket::ArrayLiteral);
+    }
+
+    #[test]
+    fn classify_r1c1_artifact() {
+        // `RC[-1]` in an A1-mode part; the `[signed-int]` offset shape is the
+        // R1C1 signal even though the parse error itself is generic.
+        assert_eq!(bucket_of("SUM(RC[-1]:RC[3]"), FeatureBucket::R1C1Artifact);
+    }
+
+    #[test]
+    fn classify_other_parse() {
+        assert_eq!(bucket_of("SUM("), FeatureBucket::OtherParse);
+    }
+
+    #[test]
+    fn classify_string_literal_brackets_do_not_mislead() {
+        // `[1]` inside a string literal must not classify as external.
+        assert_eq!(bucket_of("\"[1]x\"&SUM("), FeatureBucket::OtherParse);
     }
 
     #[test]

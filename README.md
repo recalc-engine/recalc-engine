@@ -1,19 +1,17 @@
 # Recalc
 
-**Recalculate spreadsheets exactly as Excel would — without Excel.**
+**Verify spreadsheet recalculations locally — without uploading workbooks.**
 
-Recalc is a headless, bug-for-bug Excel-compatible spreadsheet **calculation
-engine** in Rust. It opens an `.xlsx`/`.xlsm` file, rebuilds the formula
-dependency graph, and recomputes every cell the way a pinned build of Microsoft
-Excel does — same values, same errors, same quirks — with no Excel installation
-and no UI.
+Recalc is a headless spreadsheet calculation engine and local verification
+toolkit in Rust. It opens an `.xlsx`/`.xlsm` file, rebuilds the formula
+dependency graph, and reports computed values together with explicit evidence
+labels. It does not require Excel or upload workbook contents.
 
-The one property that matters: **never silently wrong.** When Recalc hits a
-function or feature it cannot reproduce faithfully, it returns a
-*distinguishable* `#UNSUPPORTED!` (or `#BLOCKED!` for sandbox-blocked I/O) and
-records it in a workbook-level fidelity report — it never invents a
-plausible-looking value. Every cell you read back is either exactly what Excel
-computes, to a documented tolerance, or it is loudly flagged.
+The one property that matters: **never silently wrong.** When Recalc cannot
+safely compute a construct, it returns a distinguishable sentinel such as
+`#UNSUPPORTED!` or `#BLOCKED!` and records a diagnostic. A cached-value match is
+labelled as cached evidence; it is not presented as an independent Excel-oracle
+result.
 
 Apache-2.0. Pure Rust core, with thin bindings for Python, Node.js, and WASM.
 
@@ -40,7 +38,8 @@ the internal `xl-*` crates. Depend on it, not on the `xl-*` crates directly.
 recalc-engine = "0.1"
 ```
 
-The same engine ships as packages for other languages:
+Language bindings are built from this source tree (availability is platform and
+release specific; check the tagged artifact before adding a dependency):
 
 ```sh
 pip install recalc-engine      # Python (import name: recalc)
@@ -106,14 +105,35 @@ See [`docs/getting-started.md`](docs/getting-started.md) for the Node and WASM
 quickstarts and the full API surface (identical operation set across all
 bindings).
 
+## Verify a workbook locally
+
+The Verify v1 command ships as the `recalc` binary of the `xl-bench` crate in
+this tree. Build and run it from a clone:
+
+```sh
+cargo run --release -p xl-bench --bin recalc -- verify OUTPUT.xlsx \
+  --policy recalc-policy.toml --json report.json
+```
+
+The contract is specified in
+[`docs/specs/recalc-verify-v1.md`](docs/specs/recalc-verify-v1.md); the report
+and receipt schemas sit beside it. `xl-bench/tests/fixtures/verify-policy.toml`
+is a working policy file to start from.
+
+Exit `0` means PASS, `1` means a measured FAIL, and `2` means FALLBACK because
+the requested evidence or a safe calculation was unavailable. Reports follow
+the versioned `recalc.verify.report/v1` schema. Independent pinned-Excel
+evidence and hosted batch service availability are separate, explicitly
+labelled workstreams.
+
 ## Fidelity, measured
 
-"Excel-faithful" is a measured number here, not an adjective: agreement with a
-pinned Excel build on a corpus of real workbooks. Text, logical, and error
-values must match exactly; floating-point results match to a documented,
-published tolerance. The open benchmark that scores every engine the same way —
-including which engines fail *loudly* versus *silently* — is **Sheetmark**:
-<https://github.com/sheetmark/sheetmark>.
+Compatibility claims are evidence-scoped. Recalc reports whether a value was
+computed, matched a stored value, matched a supplied baseline, or was refused.
+The current CLI supports stored cached values, a local `--baseline`, and a
+supplied result with an explicit `--excel-build` label. The label records caller
+provenance; it is not inferred by Recalc. Do not infer pinned-Excel agreement
+from a local run.
 
 ## Scope — what it is, and isn't
 
@@ -122,8 +142,7 @@ Recalc is a **calculation** engine, on purpose. v1 does not:
 - render, lay out, or draw charts (it computes values, it does not draw sheets);
 - *execute* VBA/macros (they are parsed only far enough to trace dependencies);
 - resolve external workbooks, or reach the network/disk from a formula
-  (`WEBSERVICE`/`RTD`/`STOCKHISTORY` return `#BLOCKED!`; `RAND` is seedable and
-  the clock is injectable, so a recalculation is deterministic);
+  (`WEBSERVICE`/`RTD`/`STOCKHISTORY` return `#BLOCKED!`);
 - support non-en-US locale semantics, or a Google Sheets compatibility mode;
 - write a full-fidelity file back (v1 writes computed values into the original
   file's cached-value slots only).
@@ -158,6 +177,5 @@ Apache License, Version 2.0 — see [`LICENSE`](LICENSE).
 ---
 
 Microsoft and Excel are trademarks of the Microsoft group of companies. Recalc
-and Sheetmark are independent projects, not affiliated with, sponsored by, or
-endorsed by Microsoft. References to Excel are nominative — they identify the
-product whose behavior Sheetmark measures compatibility against.
+is independent and not affiliated with, sponsored by, or endorsed by Microsoft.
+References to Excel are nominative.
