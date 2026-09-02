@@ -2,27 +2,27 @@
 
 ## What Recalc is
 
-Recalc is a headless, bug-for-bug Excel-compatible spreadsheet **calculation
-engine** written in Rust. It opens an `.xlsx`/`.xlsm` file, rebuilds the formula
-dependency graph, and recalculates exactly as Microsoft Excel would — same
-values, same errors, same quirks — with **no Excel installation and no UI**. It
-is an open-core *library* (Apache-2.0), shipped as bindings for Python, Node.js,
-WASM, and Rust. (A separate proprietary batch server, `xl-server`, is *not*
-covered here — this document is the free library only.)
+Recalc is a headless spreadsheet calculation engine and local verification
+toolkit written in Rust. It opens an `.xlsx`/`.xlsm` file, rebuilds the formula
+dependency graph, and reports computed values with explicit evidence labels.
+It requires no Excel installation and does not upload workbook contents. (A
+separate proprietary batch server, `xl-server`, is *not* covered here.)
 
 The differentiator is a hard product rule: **never silently wrong.** Any
 function or construct the engine cannot faithfully reproduce becomes a
 *distinguishable* error value — `#UNSUPPORTED!` (or `#BLOCKED!` for sandbox-
 blocked I/O like `WEBSERVICE`) — plus a workbook-level **diagnostic**, rather
-than a guessed value that looks right but isn't. Every cell you read back is
-either exactly what Excel computes, or it is loudly flagged.
+than a guessed value that looks right but isn't. Cached-value matches are
+labelled as cached evidence, not as independent pinned-Excel results.
+Unsupported, blocked, and unavailable cases remain explicit refusals.
 
 ---
 
 ## Install
 
-Recalc **v0.1.0** ships as a package on all three ecosystems under one name,
-`recalc-engine`:
+The source tree contains the Rust library and binding build paths. Registry
+availability is platform/release specific and must be verified before adding a
+dependency:
 
 ```sh
 pip install recalc-engine      # Python (CPython >= 3.10; import name: recalc)
@@ -30,17 +30,14 @@ npm install recalc-engine      # Node.js native addon
 cargo add recalc-engine        # Rust
 ```
 
-- **Python** — a portable `abi3` wheel targeting CPython 3.10+. The PyPI
-  distribution is `recalc-engine`; the *imported module* is `recalc`
-  (distribution-name ≠ import-name is standard PyPI practice).
-- **Node.js** — a prebuilt N-API addon (stable-ABI level `napi4`), which loads
-  on any Node ≥ 10.16.
+- **Python** — the binding builds a portable `abi3` wheel targeting CPython
+  3.10+; publication is not implied by this checkout.
+- **Node.js** — the binding uses the stable N-API surface; published artifacts
+  are not assumed available.
 - **Rust** — depend on the `recalc-engine` facade crate, which re-exports the
   engine's public surface (`xl_io` loaders + the `xl_engine` API).
 
-Prebuilt binaries are published for Linux (x86_64, aarch64), macOS (x86_64 and
-Apple silicon), and Windows (x86_64). On any other platform, `pip`/`npm` fall
-back to building from source, which needs the toolchain below.
+Clean-machine package smoke tests are required before any release claim.
 
 ### Build from source
 
