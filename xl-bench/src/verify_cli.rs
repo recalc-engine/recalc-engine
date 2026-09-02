@@ -125,6 +125,12 @@ pub fn run_v1(parsed: &VerifyArgs, program: &str) -> u8 {
         eprintln!("{program} verify: --excel-result and --excel-build must be supplied together");
         return 64;
     }
+    if parsed.baseline.is_some() && parsed.excel_result.is_some() {
+        eprintln!(
+            "{program} verify: choose one comparison source: --baseline or --excel-result, not both"
+        );
+        return 64;
+    }
     if let Err(e) = load_policy(parsed.policy.as_deref()) {
         eprintln!("{program} verify: invalid policy: {e}");
         return 64;
@@ -229,6 +235,19 @@ mod tests {
         let parsed = VerifyArgs {
             input: PathBuf::from("tests/fixtures/clean_values.xlsx"),
             excel_result: Some(PathBuf::from("tests/fixtures/clean_values.xlsx")),
+            quiet: true,
+            ..VerifyArgs::default()
+        };
+        assert_eq!(run_v1(&parsed, "recalc"), 64);
+    }
+
+    #[test]
+    fn run_v1_rejects_two_comparison_sources() {
+        let parsed = VerifyArgs {
+            input: PathBuf::from("tests/fixtures/clean_values.xlsx"),
+            baseline: Some(PathBuf::from("tests/fixtures/clean_values.xlsx")),
+            excel_result: Some(PathBuf::from("tests/fixtures/clean_values.xlsx")),
+            excel_build: Some("16.0.1".to_string()),
             quiet: true,
             ..VerifyArgs::default()
         };

@@ -537,9 +537,21 @@ pub fn verify_workbook(
     run_verify_internal(path, policy_path, baseline_path, false)
 }
 
+type CellKey = (String, u32, u32);
+
+/// Recalculate `path` and return every formula cell's value plus the set of
+/// cells whose formula text could not be parsed (the engine surfaces those as
+/// `#UNSUPPORTED!` with a `ParseError` diagnostic; Verify reports them as the
+/// distinct `parse_failed` outcome so `on_parse_error` can act on them).
 fn computed_values(
     path: &Path,
-) -> Result<std::collections::BTreeMap<(String, u32, u32), xl_value::Value>, String> {
+) -> Result<
+    (
+        std::collections::BTreeMap<CellKey, xl_value::Value>,
+        std::collections::BTreeSet<CellKey>,
+    ),
+    String,
+> {
     let workbook = xl_io::open(path).map_err(|e| e.to_string())?;
     let names: Vec<(String, u32, u32)> = workbook
         .sheets
@@ -555,8 +567,16 @@ fn computed_values(
     let mut engine = xl_engine::Engine::load(workbook);
     engine.recalc();
     let mut values = std::collections::BTreeMap::new();
+    let mut parse_failed = std::collections::BTreeSet::new();
     for (sheet, row, col) in names {
         if let Some(sid) = engine.sheet_id(&sheet) {
+            if engine
+                .diagnostics_for(sid, row, col)
+                .iter()
+                .any(|d| matches!(d.kind, xl_engine::DiagnosticKind::ParseError))
+            {
+                parse_failed.insert((sheet.clone(), row, col));
+            }
             values.insert(
                 (sheet, row, col),
                 engine
@@ -566,7 +586,7 @@ fn computed_values(
             );
         }
     }
-    Ok(values)
+    Ok((values, parse_failed))
 }
 
 fn cached_values(
@@ -650,11 +670,12 @@ fn run_verify_internal(
             if baseline_cached {
                 cached_values(p)
             } else {
-                computed_values(p)
+                computed_values(p).map(|(values, _)| values)
             }
         })
         .transpose()?;
-    let candidate_values = Some(computed_values(path)?);
+    let (candidate_map, parse_failed) = computed_values(path)?;
+    let candidate_values = Some(candidate_map);
     let mut baseline_mismatches = std::collections::BTreeSet::new();
     let mut baseline_missing = std::collections::BTreeSet::new();
     if let (Some(candidate), Some(baseline)) = (&candidate_values, &baseline_values) {
@@ -824,10 +845,14 @@ fn run_verify_internal(
                 })
         })
         .unwrap_or_default();
+    // Parse failures also carry `#UNSUPPORTED!`; they answer to
+    // `on_parse_error`, not `on_unsupported`.
+    let computed_unsupported = computed_unsupported.saturating_sub(parse_failed.len());
     for (count, action) in [
         (computed_unsupported, policy.on_unsupported),
         (computed_blocked, policy.on_blocked),
         (computed_resource, policy.on_resource_limit),
+        (parse_failed.len(), policy.on_parse_error),
     ] {
         if count > 0 {
             match action {
@@ -867,10 +892,15 @@ fn run_verify_internal(
     let mut unsupported_count = 0usize;
     let mut blocked_count = 0usize;
     let mut resource_count = 0usize;
+    let mut parse_failed_count = 0usize;
     for c in &report.cells {
-        if let Some(xl_value::Value::Error(error)) = candidate_values
-            .as_ref()
-            .and_then(|v| v.get(&(c.sheet.clone(), c.row, c.col)))
+        let key = (c.sheet.clone(), c.row, c.col);
+        if parse_failed.contains(&key) {
+            parse_failed_count += 1;
+            continue;
+        }
+        if let Some(xl_value::Value::Error(error)) =
+            candidate_values.as_ref().and_then(|v| v.get(&key))
         {
             match error {
                 xl_value::ErrorKind::Unsupported => unsupported_count += 1,
@@ -884,14 +914,14 @@ fn run_verify_internal(
     // report; retain its count rather than under-reporting the refusal.
     unsupported_count = unsupported_count.max(
         s.engine_unsupported
-            .saturating_sub(blocked_count + resource_count),
+            .saturating_sub(blocked_count + resource_count + parse_failed_count),
     );
     let comparison_mismatches = if baseline_path.is_some() {
         baseline_mismatches.len()
     } else {
         s.mismatch
     };
-    payload.push_str(&format!("\"summary\":{{\"formula_cells\":{},\"recalc_computed\":{},\"formula_errors\":{},\"unsupported\":{},\"blocked\":{},\"resource_limited\":{},\"mismatches\":{},\"assertion_failures\":{},\"evidence_counts\":{{{}:{}}}}},", s.total_formula_cells, s.total_formula_cells.saturating_sub(unsupported_count + blocked_count + resource_count + formula_errors), formula_errors, unsupported_count, blocked_count, resource_count, comparison_mismatches, assertion_failures.len(), crate::json::escape_str(comparison_source), s.total_formula_cells.saturating_sub(s.no_oracle)));
+    payload.push_str(&format!("\"summary\":{{\"formula_cells\":{},\"recalc_computed\":{},\"formula_errors\":{},\"unsupported\":{},\"blocked\":{},\"resource_limited\":{},\"parse_failed\":{},\"mismatches\":{},\"assertion_failures\":{},\"evidence_counts\":{{{}:{}}}}},", s.total_formula_cells, s.total_formula_cells.saturating_sub(unsupported_count + blocked_count + resource_count + parse_failed_count + formula_errors), formula_errors, unsupported_count, blocked_count, resource_count, parse_failed_count, comparison_mismatches, assertion_failures.len(), crate::json::escape_str(comparison_source), s.total_formula_cells.saturating_sub(s.no_oracle)));
     payload.push_str("\"cells\":[");
     let mut issues = preflight_issues;
     for (sheet, cell_ref, operator) in &assertion_failures {
@@ -908,18 +938,21 @@ fn run_verify_internal(
         if i > 0 {
             payload.push(',');
         }
-        let actual = candidate_values
-            .as_ref()
-            .and_then(|v| v.get(&(c.sheet.clone(), c.row, c.col)));
-        let outcome = match actual {
-            Some(xl_value::Value::Error(xl_value::ErrorKind::Blocked)) => "blocked",
-            Some(xl_value::Value::Error(xl_value::ErrorKind::Resource)) => "resource_limited",
-            Some(xl_value::Value::Error(xl_value::ErrorKind::Unsupported)) => "unsupported",
-            Some(xl_value::Value::Error(_)) => "formula_error",
-            _ => match &c.status {
-                CellStatus::EngineUnsupported => "unsupported",
-                _ => "recalc_computed",
-            },
+        let cell_key = (c.sheet.clone(), c.row, c.col);
+        let actual = candidate_values.as_ref().and_then(|v| v.get(&cell_key));
+        let outcome = if parse_failed.contains(&cell_key) {
+            "parse_failed"
+        } else {
+            match actual {
+                Some(xl_value::Value::Error(xl_value::ErrorKind::Blocked)) => "blocked",
+                Some(xl_value::Value::Error(xl_value::ErrorKind::Resource)) => "resource_limited",
+                Some(xl_value::Value::Error(xl_value::ErrorKind::Unsupported)) => "unsupported",
+                Some(xl_value::Value::Error(_)) => "formula_error",
+                _ => match &c.status {
+                    CellStatus::EngineUnsupported => "unsupported",
+                    _ => "recalc_computed",
+                },
+            }
         };
         let (evidence, source) = if baseline_path.is_some() {
             let key = (c.sheet.clone(), c.row, c.col);
@@ -947,11 +980,44 @@ fn run_verify_internal(
                 )
                 .at(&c.sheet, &c.cell_ref),
             );
-        } else if matches!(&c.status, CellStatus::EngineUnsupported) {
-            issues.push(
-                Issue::new("unsupported", "warning", "engine refused this cell")
-                    .at(&c.sheet, &c.cell_ref),
-            );
+        } else if outcome != "recalc_computed" {
+            // Every non-computed outcome is a finding; its severity follows
+            // the policy action that decides the run.
+            let (code, action, message) = match outcome {
+                "parse_failed" => (
+                    "parse_failed",
+                    policy.on_parse_error,
+                    "formula could not be parsed".to_string(),
+                ),
+                "blocked" => (
+                    "blocked",
+                    policy.on_blocked,
+                    "formula reaches a sandbox-blocked source".to_string(),
+                ),
+                "resource_limited" => (
+                    "resource_limited",
+                    policy.on_resource_limit,
+                    "formula hit an engine resource limit".to_string(),
+                ),
+                "formula_error" => (
+                    "formula_error",
+                    policy.on_formula_error,
+                    match actual {
+                        Some(xl_value::Value::Error(e)) => format!("formula evaluates to {e}"),
+                        _ => "formula evaluates to an error".to_string(),
+                    },
+                ),
+                _ => (
+                    "unsupported",
+                    policy.on_unsupported,
+                    "engine refused this cell".to_string(),
+                ),
+            };
+            let severity = match action {
+                PolicyAction::Fail => "error",
+                PolicyAction::Fallback | PolicyAction::Allow => "warning",
+            };
+            issues.push(Issue::new(code, severity, message).at(&c.sheet, &c.cell_ref));
         } else if matches!(&c.status, CellStatus::NoOracle) {
             issues.push(
                 Issue::new(
@@ -1220,6 +1286,63 @@ mod tests {
         assert!(json.contains("\"recalc_computed\":1"));
         assert!(json.contains("\"formula_errors\":1"));
         assert!(json.contains("\"calculation_outcome\":\"formula_error\""));
+    }
+
+    /// A formula error is a finding in its own right: the JSON `issues` list
+    /// and the human summary must both name the cell.
+    #[test]
+    fn formula_errors_are_listed_as_issues() {
+        let run =
+            verify_workbook(Path::new("tests/fixtures/error_values.xlsx"), None, None).unwrap();
+        assert_eq!(run.decision, Decision::Fail);
+        assert!(
+            run.json
+                .contains("\"code\":\"formula_error\",\"severity\":\"error\"")
+        );
+        assert!(run.json.contains("#DIV/0!"));
+        let human = run.human_report(Path::new("tests/fixtures/error_values.xlsx"));
+        assert!(human.contains("Sheet1!A3  formula_error"), "{human}");
+        assert!(human.contains("1 error"), "{human}");
+    }
+
+    /// A formula that does not parse is `parse_failed`, not `unsupported`, and
+    /// answers to `on_parse_error` — including when `on_unsupported = allow`.
+    #[test]
+    fn parse_failures_follow_on_parse_error() {
+        let path = Path::new("tests/fixtures/parse_error.xlsx");
+        let run = verify_workbook(path, None, None).unwrap();
+        assert_eq!(run.decision, Decision::Fallback);
+        assert!(
+            run.json
+                .contains("\"calculation_outcome\":\"parse_failed\"")
+        );
+        assert!(run.json.contains("\"parse_failed\":1"));
+        assert!(run.json.contains("\"unsupported\":0"));
+        assert!(
+            run.json
+                .contains("\"code\":\"parse_failed\",\"severity\":\"warning\"")
+        );
+
+        let policy = Path::new("/tmp/recalc-verify-parse-policy.toml");
+        std::fs::write(
+            policy,
+            "on_unsupported = \"allow\"\non_parse_error = \"fail\"\nrequire_comparison = false\n",
+        )
+        .unwrap();
+        let run = verify_workbook(path, Some(policy), None).unwrap();
+        assert_eq!(run.decision, Decision::Fail);
+        assert!(
+            run.json
+                .contains("\"code\":\"parse_failed\",\"severity\":\"error\"")
+        );
+        std::fs::write(
+            policy,
+            "on_unsupported = \"allow\"\non_parse_error = \"allow\"\nrequire_comparison = false\n",
+        )
+        .unwrap();
+        let run = verify_workbook(path, Some(policy), None).unwrap();
+        assert_eq!(run.decision, Decision::Pass);
+        let _ = std::fs::remove_file(policy);
     }
 
     /// `allow_stored_value_match = false` gates stored cached-value evidence

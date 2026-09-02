@@ -111,6 +111,17 @@ fn usage_errors_exit_64() {
         vec!["verify"],
         vec!["verify", "--quiet"],
         vec!["verify", "book.xlsx", "--json"],
+        vec!["verify", "book.xlsx", "--html", "out.html"],
+        vec![
+            "verify",
+            "book.xlsx",
+            "--baseline",
+            "b.xlsx",
+            "--excel-result",
+            "e.xlsx",
+            "--excel-build",
+            "16.0.1",
+        ],
         vec!["frobnicate"],
         vec![],
     ] {

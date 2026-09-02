@@ -48,6 +48,13 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("verify") => match parse_verify_args(&args[1..]) {
+            // `--html` is the harness's legacy report; the Verify v1 surface
+            // has no HTML output, so accepting it silently would be a lie.
+            Ok(parsed) if parsed.html.is_some() => {
+                eprintln!("{PROGRAM} verify: unrecognized argument: --html\n");
+                print_usage();
+                ExitCode::from(64)
+            }
             Ok(parsed) => ExitCode::from(run_v1(&parsed, PROGRAM)),
             Err(e) => {
                 eprintln!("{PROGRAM} verify: {e}\n");
