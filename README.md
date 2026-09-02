@@ -27,29 +27,23 @@ Recalc is the third option: it computes like Excel *and* is explicit about the
 moments it can't. A wrong number you can see is a footnote; a wrong number you
 can't see is a liability. Recalc is built so you never ship the second kind.
 
-## Install
+## Install from source
 
-The public Rust entry point is the `recalc-engine` crate — a thin facade over
-the internal `xl-*` crates. Depend on it, not on the `xl-*` crates directly.
-
-```toml
-# Cargo.toml
-[dependencies]
-recalc-engine = "0.1"
-```
-
-Language bindings are built from this source tree (availability is platform and
-release specific; check the tagged artifact before adding a dependency):
+The repository is the currently supported installation path. Clone it and
+build the workspace with Rust:
 
 ```sh
-pip install recalc-engine      # Python (import name: recalc)
-npm install recalc-engine      # Node.js native addon
-npm install recalc-engine-wasm # WASM (browser / edge)
+git clone https://github.com/recalc-engine/recalc-engine.git
+cd recalc-engine
+cargo build --workspace
 ```
 
-To build from source instead, clone this repository and `cargo build
---workspace` (a plain build links zero binding dependencies). Full build,
-binding, and packaging notes are in [`docs/getting-started.md`](docs/getting-started.md).
+The public Rust facade is `recalc-engine`; use it rather than depending on the
+lower-level `xl-*` crates directly when consuming this source tree. Registry
+packages and prebuilt Python, Node.js, or WASM artifacts are not represented by
+this README until a tagged release and clean-install smoke test exist. Full
+source-build and binding notes are in
+[`docs/getting-started.md`](docs/getting-started.md).
 
 ## Quickstart
 
