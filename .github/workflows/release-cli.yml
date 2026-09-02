@@ -11,6 +11,17 @@ name: Release CLI
 # Job graph: meta -> build (x5) -> checksums -> smoke (x5) -> release (tag only)
 on:
   workflow_dispatch:
+  # Pull requests get the full build + clean-machine smoke run (no release),
+  # so a change to the CLI is proven on every target before it merges.
+  pull_request:
+    paths:
+      - ".github/workflows/release-cli.yml"
+      - "recalc-cli/**"
+      - "xl-bench/**"
+      - "xl-*/**"
+      - "recalc-engine/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
   push:
     tags:
       - "cli-v*"
