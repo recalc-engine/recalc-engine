@@ -10,15 +10,14 @@
 //! the sheet at 0-based position N of the `<sheets>` collection (name strings
 //! are unique per scope, not per workbook); resolved from that sheet it
 //! shadows a workbook-global name of the same string, while every other sheet
-//! sees the global. See `docs/l2-refusal-decomposition.md` lane L2-D (the
-//! `rate`/`X` corpus shape). What this module deliberately does **not**
+//! sees the global (corpus shape: a sheet-local `rate`/`X` name shadowing a
+//! global one). What this module deliberately does **not**
 //! resolve — and returns as `#UNSUPPORTED!` / no-precedent rather than
 //! guessing — is documented per function: R1C1 (the engine parses in A1
 //! mode), 3-D spans, per-endpoint sheet-qualified ranges, non-simple
 //! defined-name bodies, and **sheet-qualified name references**
 //! (`Sheet2!name`): §18.2.6 pins storage scoping only, not which scope a
-//! qualified reference selects — that confirmation probe rides the next farm
-//! batch (lane doc, review condition 3, 2026-08-25).
+//! qualified reference selects — an oracle confirmation probe is pending.
 //!
 //! # Recursion is bounded
 //! Every walk here recurses over a *single formula's* AST, which `xl-ast` caps
@@ -241,9 +240,8 @@ pub(crate) fn rect_is_single(rect: &RectRange) -> bool {
 /// A **sheet-qualified** name reference (`Sheet2!name`) yields `None`
 /// unconditionally: §18.2.6 pins how names are *stored and scoped*, not which
 /// scope a qualified reference selects, so the engine refuses loudly instead
-/// of guessing (before L2-D the qualifier was silently ignored and the global
-/// served — a silent-wrong risk). The confirmation probe rides the next farm
-/// batch (`docs/l2-refusal-decomposition.md`, review condition 3).
+/// of guessing (previously the qualifier was silently ignored and the global
+/// served — a silent-wrong risk). An oracle confirmation probe is pending.
 ///
 /// # Body (unchanged from v0)
 /// Only a body that parses to a lone reference or a `ref:ref` range

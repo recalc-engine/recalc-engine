@@ -20,8 +20,9 @@ recalc-engine = "0.1"
 ```
 
 Depend on `recalc-engine` — not on the internal `xl-*` crates it re-exports.
-Those are published only so this facade can depend on them; their names and
-split are an implementation detail.
+Those exist only so this facade can depend on them; their names and split
+are an implementation detail, and their registry availability is
+release-specific.
 
 ## Usage
 
@@ -54,8 +55,9 @@ Excel last stored), not a value this engine computed. Call `recalc()` first.
 
 ## Other languages
 
-The same engine ships as a Python package (`pip install recalc-engine`, import
-`recalc`) and a Node addon (`npm install recalc-engine`).
+The same engine builds as a Python package (`pip install recalc-engine`, import
+`recalc`) and a Node addon (`npm install recalc-engine`); check the tagged
+release before depending on a registry artifact.
 
 ## License
 

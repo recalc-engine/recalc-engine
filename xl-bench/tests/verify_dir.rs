@@ -250,8 +250,9 @@ fn cli_verify_dir_streams_progress_unless_quiet() {
 fn cli_rejects_flag_like_values() {
     let bin = env!("CARGO_BIN_EXE_recalc");
 
-    // `--html --quiet` must be exit 2 with a clear error, not a file named
-    // `--quiet` and a silently-dropped quiet flag.
+    // `--html --quiet` must be the USAGE exit code 64 (Verify v1 spec §3)
+    // with a clear error, not a file named `--quiet` and a silently-dropped
+    // quiet flag.
     let output = std::process::Command::new(bin)
         .arg("verify")
         .arg(fixture("clean_values.xlsx"))
@@ -259,7 +260,7 @@ fn cli_rejects_flag_like_values() {
         .arg("--quiet")
         .output()
         .expect("recalc binary runs");
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(64));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("--html requires a value"),

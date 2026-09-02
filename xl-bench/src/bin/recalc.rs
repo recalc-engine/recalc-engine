@@ -72,7 +72,7 @@ fn main() -> ExitCode {
 fn print_usage() {
     eprintln!(
         "Usage:\n  \
-         recalc verify <book.xlsx> [--policy policy.toml] [--html out.html] [--json out.json] [--quiet]\n  \
+         recalc verify <book.xlsx> [--policy policy.toml] [--baseline baseline.xlsx] [--excel-result result.xlsx --excel-build LABEL] [--html out.html] [--json out.json] [--quiet]\n  \
          recalc verify-dir <dir> [--html-dir out/] [--tol=15sig] [--quiet]\n  \
          recalc tier0 <dir> [--top N] [--dump-mismatch FN1,FN2] [--dump-unsupported FN1,FN2] [--dump-n N] [--tol=15sig] [--quiet]   (INTERNAL Tier-0 fidelity cut)\n  \
          recalc decline-attribution <dir> [--top N] [--dump-cells FILE] [--quiet]   (root-cause classify every #UNSUPPORTED!/#BLOCKED!/#RESOURCE! cell; --dump-cells streams one workbook\\tsheet\\tA1\\tclass line per declined cell)\n  \
@@ -204,7 +204,7 @@ fn cmd_verify(args: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("recalc verify: {e}");
             print_usage();
-            return ExitCode::from(2);
+            return ExitCode::from(64);
         }
     };
 

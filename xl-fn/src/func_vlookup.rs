@@ -64,7 +64,7 @@
 //! **OXP-104's clean half**; a populated match is trusted only when no
 //! *absent* row precedes it (the populated rows are contiguous from the top
 //! through the match), else it defers. A `Blank`-key scan that **completes
-//! with no match** returns `#N/A` (L2-A, `docs/l2-refusal-decomposition.md`):
+//! with no match** returns `#N/A` (used-extent clamp):
 //! **OXP-104 H3** pins `VLOOKUP(<blank>, A:B, 2, FALSE)` over the whole
 //! column `{1, 2, <truly blank>, 4}` to `#N/A`, and OXP-104's blank-vs-blank
 //! NoMatch pin means the absent rows the walk cannot see are confirmed
@@ -631,8 +631,8 @@ mod tests {
     /// Blank key — so the completed scan's `#N/A` is fully determined by pinned
     /// facts, same as the bounded walk already answers
     /// (`oxp104_blank_key_over_bounded_column_no_zero_cell_is_na`). This is the
-    /// L2-A corpus shape (`docs/l2-refusal-decomposition.md`, `WC_ISIN_Lookup` =
-    /// `WC_Underlyings!$A:$B`, blank template-row keys over an all-text column).
+    /// used-extent-clamp corpus shape (a whole-column lookup name over an
+    /// all-text column, with blank template-row keys).
     #[test]
     fn oxp104_blank_key_no_match_over_whole_column_is_na() {
         let got = eval_direct(

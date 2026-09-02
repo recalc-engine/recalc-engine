@@ -130,13 +130,13 @@ comparison outcomes. These labels are intentionally not the old benchmark
 
 ### Comparison evidence
 
-- `matches_stored_value` / `differs_from_stored_value` — comparison with the
+- `matches_stored` / `differs_stored` — comparison with the
   candidate workbook's cached `<v>` value. The receipt states that this cache
   is not a pinned Excel oracle.
-- `matches_baseline` / `differs_from_baseline` — comparison with the selected
+- `matches_baseline` / `differs_baseline` — comparison with the selected
   baseline workbook under the declared baseline rule. It is not an Excel
   claim.
-- `matches_supplied_excel_result` / `differs_from_supplied_excel_result` —
+- `matches_supplied_excel` / `differs_supplied_excel` —
   comparison with a supplied result carrying an identified Excel build and
   source hash. This is the only v1 label that can support a pinned-Excel
   comparison statement.

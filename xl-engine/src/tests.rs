@@ -553,7 +553,7 @@ fn defined_name_simple_ref_resolves() {
 // A `definedName` with `localSheetId="N"` is scoped to the sheet at 0-based
 // position N of the `<sheets>` collection; within that sheet it shadows a
 // workbook-global name of the same string, and other sheets see the global.
-// `docs/l2-refusal-decomposition.md` lane L2-D (the `rate`/`X` corpus shape).
+// Corpus shape: a sheet-local `rate`/`X` name shadowing a global one.
 
 /// Two-sheet workbook with explicit `sheets_index` values, to model files
 /// where skipped `<sheets>` entries (chartsheets, veryHidden VBA sheets)
@@ -684,8 +684,8 @@ fn sheet_qualified_name_reference_is_refused_loudly() {
     // `Sheet1!Rate`: which scope a sheet-QUALIFIED name reference selects is
     // not determined by ECMA-376 §18.2.6 (it pins storage scoping only) —
     // unpinned semantics, so the engine refuses loudly rather than guessing.
-    // Oracle confirmation probe rides the next farm batch (lane doc, review
-    // condition 3). Note: before L2-D this silently resolved the global with
+    // An oracle confirmation probe is pending. Note: before this change the
+    // engine silently resolved the global with
     // the qualifier IGNORED — a silent-wrong risk the refusal replaces.
     let names = vec![DefinedName {
         name: "Rate".to_string(),
@@ -1015,7 +1015,7 @@ fn vlookup_whole_column_via_defined_name() {
     );
 }
 
-/// L2-A corpus shape (docs/l2-refusal-decomposition.md example 7, lane L2-A):
+/// Corpus shape (used-extent clamp, example 7):
 /// a defined name whose body is a **`$`-anchored, sheet-qualified whole-column
 /// range** (`WC_ISIN_Lookup` = `WC_Underlyings!$A:$B`) used as an exact-match
 /// VLOOKUP `table_array`, with the corpus's trailing empty `range_lookup`

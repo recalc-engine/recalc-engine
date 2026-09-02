@@ -88,7 +88,7 @@
 //! left as-is (unrelated to and unaffected by the `exact_eq` scoping above —
 //! see that module's own docs for why an absent row cannot actually hide an
 //! extra match). A `Blank`-key exact scan that **completes with no match**
-//! returns `#N/A` (L2-A, `docs/l2-refusal-decomposition.md`): **OXP-104 H1**
+//! returns `#N/A` (used-extent clamp): **OXP-104 H1**
 //! pins `MATCH(<blank>, A:A, 0)` over the whole column `{1, 2, <truly
 //! blank>, 4}` to `#N/A`, and the blank-vs-blank NoMatch pin means the
 //! absent rows are confirmed no-matches — the used-extent answer equals the

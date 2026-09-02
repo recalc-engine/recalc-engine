@@ -93,7 +93,7 @@ wasm-bindgen --target web target/wasm32-unknown-unknown/release/xl_ffi.wasm --ou
 #### Rust (use the crates directly)
 
 There is no separate "binding" for Rust — you depend on the engine. The
-published entry point is the `recalc-engine` facade crate:
+entry point is the `recalc-engine` facade crate:
 
 ```sh
 cargo add recalc-engine

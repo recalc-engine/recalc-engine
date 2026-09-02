@@ -2,8 +2,7 @@
 //! refusal actually refuse?
 //!
 //! # The population this decomposes
-//! [`crate::decline`]'s `other_shared_expanded` sub-bucket (the W-B doc's
-//! **L2 lane**, `docs/shared-residual-analysis.md`): bodyless
+//! [`crate::decline`]'s `other_shared_expanded` sub-bucket: bodyless
 //! `<f t="shared"/>` follow-on cells whose group master **parses** and whose
 //! expansion (master translated to the follow-on's position, ECMA-376
 //! §18.17.2) succeeded — yet the expanded formula still evaluates to a recalc

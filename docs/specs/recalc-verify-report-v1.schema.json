@@ -78,7 +78,7 @@
           "calculation_outcome": {"enum": ["recalc_computed", "formula_error", "unsupported", "blocked", "resource_limited", "parse_failed"]},
           "value": {},
           "diagnostics": {"type": "array", "items": {"type": "string"}},
-          "evidence": {"type": "array", "items": {"type": "object", "required": ["label", "source"], "additionalProperties": true, "properties": {"label": {"type": "string"}, "source": {"type": "string"}}}}
+          "evidence": {"type": "array", "items": {"type": "object", "required": ["label", "source"], "additionalProperties": true, "properties": {"label": {"enum": ["matches_stored", "differs_stored", "matches_baseline", "differs_baseline", "matches_supplied_excel", "differs_supplied_excel", "assertion_passed", "assertion_failed", "evidence_unavailable"]}, "source": {"enum": ["cached_value", "baseline", "supplied_excel_result", "assertion"]}}}}
         }
       }
     },

@@ -218,3 +218,18 @@ fn cli_verify_accepts_identified_excel_result() {
     assert!(json.contains("16.0.12345.20000"));
     std::fs::remove_dir_all(&tmp).unwrap();
 }
+
+/// Exit code 64 (`USAGE`, `docs/specs/recalc-verify-v1.md` §3): invalid
+/// arguments claim no verification decision, so they must not reuse the
+/// `FALLBACK` code 2 that a load failure legitimately returns.
+#[test]
+fn cli_verify_exits_64_on_invalid_arguments() {
+    let bin = env!("CARGO_BIN_EXE_recalc");
+    let output = std::process::Command::new(bin)
+        .arg("verify")
+        .arg("--quiet")
+        .output()
+        .expect("recalc binary runs");
+    assert_eq!(output.status.code(), Some(64));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("missing <book.xlsx>"));
+}

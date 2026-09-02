@@ -634,7 +634,9 @@ fn run_verify_internal(
             crate::json::escape_str("baseline lacks one or more candidate formula cells")
         ));
     }
-    if !policy.allow_stored_value_match {
+    // The stored-value gate applies only when stored cached values are the
+    // active comparison source; a baseline run never reads the candidate cache.
+    if baseline_path.is_none() && !policy.allow_stored_value_match {
         fallback = true;
         preflight_issues.push("{\"code\":\"stored_evidence_disabled\",\"severity\":\"warning\",\"message\":\"policy disallows stored cached-value evidence\"}".to_string());
     }
@@ -762,7 +764,7 @@ fn run_verify_internal(
     } else {
         s.mismatch
     };
-    payload.push_str(&format!("\"summary\":{{\"formula_cells\":{},\"recalc_computed\":{},\"formula_errors\":{},\"unsupported\":{},\"blocked\":{},\"resource_limited\":{},\"mismatches\":{},\"assertion_failures\":{},\"evidence_counts\":{{{}:{}}}}},", s.total_formula_cells, s.total_formula_cells.saturating_sub(unsupported_count + blocked_count + resource_count), formula_errors, unsupported_count, blocked_count, resource_count, comparison_mismatches, assertion_failures.len(), crate::json::escape_str(comparison_source), s.total_formula_cells.saturating_sub(s.no_oracle)));
+    payload.push_str(&format!("\"summary\":{{\"formula_cells\":{},\"recalc_computed\":{},\"formula_errors\":{},\"unsupported\":{},\"blocked\":{},\"resource_limited\":{},\"mismatches\":{},\"assertion_failures\":{},\"evidence_counts\":{{{}:{}}}}},", s.total_formula_cells, s.total_formula_cells.saturating_sub(unsupported_count + blocked_count + resource_count + formula_errors), formula_errors, unsupported_count, blocked_count, resource_count, comparison_mismatches, assertion_failures.len(), crate::json::escape_str(comparison_source), s.total_formula_cells.saturating_sub(s.no_oracle)));
     payload.push_str("\"cells\":[");
     let mut issues = preflight_issues;
     for (sheet, cell_ref, operator) in &assertion_failures {
@@ -1007,6 +1009,37 @@ mod tests {
             digest,
             sha256_hex(json.replace(digest, "__PAYLOAD_HASH__").as_bytes())
         );
+        let _ = std::fs::remove_file(policy);
+    }
+
+    /// A formula error (`#DIV/0!`) is its own calculation outcome: the summary
+    /// buckets are disjoint, so `recalc_computed` must exclude it.
+    #[test]
+    fn formula_errors_are_not_counted_as_recalc_computed() {
+        let path = Path::new("tests/fixtures/error_values.xlsx");
+        let (json, _) = run_cached_verify(path, None).unwrap();
+        assert!(json.contains("\"formula_cells\":2"));
+        assert!(json.contains("\"recalc_computed\":1"));
+        assert!(json.contains("\"formula_errors\":1"));
+        assert!(json.contains("\"calculation_outcome\":\"formula_error\""));
+    }
+
+    /// `allow_stored_value_match = false` gates stored cached-value evidence
+    /// only. A baseline run compares against the baseline workbook, so the
+    /// stored-value gate must not force FALLBACK there.
+    #[test]
+    fn stored_value_gate_does_not_apply_to_baseline_runs() {
+        let path = Path::new("tests/fixtures/clean_values.xlsx");
+        let policy = Path::new("/tmp/recalc-verify-baseline-only-policy.toml");
+        std::fs::write(
+            policy,
+            "allow_stored_value_match = false\nallow_baseline_match = true\n",
+        )
+        .unwrap();
+        let (json, decision) = run_verify_v1(path, Some(policy), Some(path)).unwrap();
+        assert_eq!(decision, Decision::Pass);
+        assert!(json.contains("matches_baseline"));
+        assert!(!json.contains("stored_evidence_disabled"));
         let _ = std::fs::remove_file(policy);
     }
 }
