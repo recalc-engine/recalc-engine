@@ -128,6 +128,7 @@ fn build_named_with_hidden(
         sheets: vec![Sheet {
             name: name.to_string(),
             sheet_id: 1,
+            sheets_index: 0,
             cells: map,
             hidden_rows,
         }],
@@ -393,6 +394,27 @@ fn unknown_function_is_unsupported_with_diagnostic() {
 }
 
 #[test]
+fn external_data_functions_are_blocked_with_distinct_sentinel() {
+    for function in ["WEBSERVICE", "RTD", "STOCKHISTORY"] {
+        let mut e = Engine::load(build(vec![(
+            0,
+            0,
+            formula_cell(&format!("{function}(\"example\")")),
+        )]));
+        e.recalc();
+        assert_eq!(
+            e.value(s0(), 0, 0),
+            Some(&Value::Error(ErrorKind::Blocked)),
+            "{function} must use the sandbox blocked sentinel"
+        );
+        let diags = e.diagnostics_for(s0(), 0, 0);
+        assert_eq!(diags.len(), 1, "{function} emits one refusal");
+        assert_eq!(diags[0].kind, DiagnosticKind::UnsupportedConstruct);
+        assert!(diags[0].message.contains("blocked external-data function"));
+    }
+}
+
+#[test]
 fn parse_error_is_unsupported_with_diagnostic_no_panic() {
     // An unterminated string is a parse error; the cell must become
     // #UNSUPPORTED! with a diagnostic, never a panic.
@@ -527,6 +549,307 @@ fn defined_name_simple_ref_resolves() {
     assert_eq!(e.value(s0(), 1, 0), Some(&num(14.0)));
 }
 
+// ---- Lane L2-D: sheet-scoped defined names (ECMA-376 §18.2.6) ------------
+// A `definedName` with `localSheetId="N"` is scoped to the sheet at 0-based
+// position N of the `<sheets>` collection; within that sheet it shadows a
+// workbook-global name of the same string, and other sheets see the global.
+// `docs/l2-refusal-decomposition.md` lane L2-D (the `rate`/`X` corpus shape).
+
+/// Two-sheet workbook with explicit `sheets_index` values, to model files
+/// where skipped `<sheets>` entries (chartsheets, veryHidden VBA sheets)
+/// shift the `localSheetId` index space away from the loaded tab order.
+fn build_two_sheets_indexed(
+    s1: (&str, u32, Vec<(u32, u32, Cell)>),
+    s2: (&str, u32, Vec<(u32, u32, Cell)>),
+    defined_names: Vec<DefinedName>,
+) -> Workbook {
+    let mk = |cells: Vec<(u32, u32, Cell)>| {
+        let mut map: BTreeMap<(u32, u32), Cell> = BTreeMap::new();
+        for (r, c, cell) in cells {
+            map.insert((r, c), cell);
+        }
+        map
+    };
+    Workbook {
+        sheets: vec![
+            Sheet {
+                name: s1.0.to_string(),
+                sheet_id: 1,
+                sheets_index: s1.1,
+                cells: mk(s1.2),
+                hidden_rows: std::collections::BTreeSet::new(),
+            },
+            Sheet {
+                name: s2.0.to_string(),
+                sheet_id: 2,
+                sheets_index: s2.1,
+                cells: mk(s2.2),
+                hidden_rows: std::collections::BTreeSet::new(),
+            },
+        ],
+        date_system: DateSystem::default(),
+        calc_settings: CalcSettings::default(),
+        defined_names,
+        flags: WorkbookFlags::default(),
+    }
+}
+
+#[test]
+fn sheet_local_name_shadows_global_on_its_sheet_only() {
+    // `Rate` is defined BOTH workbook-globally (→ Sheet1!$A$1 = 10) and
+    // locally on Sheet2 (`localSheetId="1"` → Sheet2!$A$1 = 100). The name
+    // match is ASCII-case-insensitive (the local is declared `rate`).
+    let names = vec![
+        DefinedName {
+            name: "Rate".to_string(),
+            formula: "Sheet1!$A$1".to_string(),
+            sheet_scope: None,
+        },
+        DefinedName {
+            name: "rate".to_string(),
+            formula: "Sheet2!$A$1".to_string(),
+            sheet_scope: Some(1),
+        },
+    ];
+    let mut e = Engine::load(build_two_sheets_indexed(
+        (
+            "Sheet1",
+            0,
+            vec![
+                (0, 0, literal_cell(num(10.0))),
+                (0, 1, formula_cell("Rate*2")), // B1 on Sheet1 → global
+            ],
+        ),
+        (
+            "Sheet2",
+            1,
+            vec![
+                (0, 0, literal_cell(num(100.0))),
+                (0, 1, formula_cell("Rate*2")), // B1 on Sheet2 → local shadows
+            ],
+        ),
+        names,
+    ));
+    e.recalc();
+    assert_eq!(
+        e.value(SheetId(0), 0, 1),
+        Some(&num(20.0)),
+        "off-scope sheet sees the workbook-global name"
+    );
+    assert_eq!(
+        e.value(SheetId(1), 0, 1),
+        Some(&num(200.0)),
+        "in-scope sheet: the sheet-local name shadows the global"
+    );
+    assert!(e.diagnostics().is_empty());
+}
+
+#[test]
+fn sheet_local_name_resolves_in_scope_and_refuses_out_of_scope() {
+    // `X` exists ONLY as a Sheet1-local name. On Sheet1 it resolves; on
+    // Sheet2 there is no visible name of that string — refuse loudly
+    // (#UNSUPPORTED! + diagnostic), never fall back to the local.
+    let names = vec![DefinedName {
+        name: "X".to_string(),
+        formula: "Sheet1!$A$1".to_string(),
+        sheet_scope: Some(0),
+    }];
+    let mut e = Engine::load(build_two_sheets_indexed(
+        (
+            "Sheet1",
+            0,
+            vec![(0, 0, literal_cell(num(5.0))), (0, 1, formula_cell("X+1"))],
+        ),
+        ("Sheet2", 1, vec![(0, 1, formula_cell("X+1"))]),
+        names,
+    ));
+    e.recalc();
+    assert_eq!(e.value(SheetId(0), 0, 1), Some(&num(6.0)));
+    assert_eq!(
+        e.value(SheetId(1), 0, 1),
+        Some(&Value::Error(ErrorKind::Unsupported)),
+        "a name local to another sheet is not visible here"
+    );
+    let diags = e.diagnostics_for(SheetId(1), 0, 1);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.starts_with("unsupported defined name: ")),
+        "out-of-scope name must refuse with the defined-name diagnostic, got {diags:?}"
+    );
+}
+
+#[test]
+fn sheet_qualified_name_reference_is_refused_loudly() {
+    // `Sheet1!Rate`: which scope a sheet-QUALIFIED name reference selects is
+    // not determined by ECMA-376 §18.2.6 (it pins storage scoping only) —
+    // unpinned semantics, so the engine refuses loudly rather than guessing.
+    // Oracle confirmation probe rides the next farm batch (lane doc, review
+    // condition 3). Note: before L2-D this silently resolved the global with
+    // the qualifier IGNORED — a silent-wrong risk the refusal replaces.
+    let names = vec![DefinedName {
+        name: "Rate".to_string(),
+        formula: "Sheet1!$A$1".to_string(),
+        sheet_scope: None,
+    }];
+    let mut e = Engine::load(build_named(
+        "Sheet1",
+        vec![
+            (0, 0, literal_cell(num(7.0))),
+            (1, 0, formula_cell("Sheet1!Rate*2")),
+        ],
+        names,
+    ));
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 1, 0),
+        Some(&Value::Error(ErrorKind::Unsupported)),
+        "sheet-qualified name reference is unpinned → loud refusal"
+    );
+    let diags = e.diagnostics_for(s0(), 1, 0);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.starts_with("unsupported defined name: ")),
+        "qualified-name refusal must carry the defined-name diagnostic, got {diags:?}"
+    );
+}
+
+#[test]
+fn indirect_of_sheet_qualified_name_refuses_rather_than_guessing_ref() {
+    // `INDIRECT("Sheet1!Rate")`: the INDIRECT name route maps a genuinely
+    // undefined name to #REF!, but a sheet-QUALIFIED name reaching `None` is
+    // unpinned-refusal territory (lane L2-D) — it must refuse loudly, not
+    // emit the plausible #REF!.
+    let names = vec![DefinedName {
+        name: "Rate".to_string(),
+        formula: "Sheet1!$A$1".to_string(),
+        sheet_scope: None,
+    }];
+    let mut e = Engine::load(build_named(
+        "Sheet1",
+        vec![
+            (0, 0, literal_cell(num(7.0))),
+            (1, 0, formula_cell("INDIRECT(\"Sheet1!Rate\")*2")),
+        ],
+        names,
+    ));
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 1, 0),
+        Some(&Value::Error(ErrorKind::Unsupported)),
+        "INDIRECT of a sheet-qualified name is unpinned → loud refusal, not #REF!"
+    );
+    let diags = e.diagnostics_for(s0(), 1, 0);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.starts_with("unsupported defined name: ")),
+        "must carry the defined-name diagnostic, got {diags:?}"
+    );
+}
+
+#[test]
+fn local_scope_maps_through_the_skipped_sheets_index_space() {
+    // The workbook's `<sheets>` collection was [chartsheet, Alpha, Beta]:
+    // the chartsheet (collection index 0) is skipped at load, so the loaded
+    // tabs are Alpha (SheetId 0, sheets_index 1) and Beta (SheetId 1,
+    // sheets_index 2). `localSheetId` indexes the COLLECTION (§18.2.6):
+    //   • `T` global → Alpha!$A$1, and `T` local to collection index 2
+    //     (= Beta) → Beta!$A$1: Beta shadows, Alpha sees the global.
+    //   • `U` local to collection index 0 (= the SKIPPED chartsheet): scoped
+    //     to a sheet that hosts no formulas — it must resolve NOWHERE (and
+    //     must not be misread as Alpha-local via the tab index).
+    let names = vec![
+        DefinedName {
+            name: "T".to_string(),
+            formula: "Alpha!$A$1".to_string(),
+            sheet_scope: None,
+        },
+        DefinedName {
+            name: "T".to_string(),
+            formula: "Beta!$A$1".to_string(),
+            sheet_scope: Some(2),
+        },
+        DefinedName {
+            name: "U".to_string(),
+            formula: "Alpha!$A$1".to_string(),
+            sheet_scope: Some(0),
+        },
+    ];
+    let mut e = Engine::load(build_two_sheets_indexed(
+        (
+            "Alpha",
+            1,
+            vec![
+                (0, 0, literal_cell(num(1.0))),
+                (0, 1, formula_cell("T*10")),
+                (0, 2, formula_cell("U+1")),
+            ],
+        ),
+        (
+            "Beta",
+            2,
+            vec![(0, 0, literal_cell(num(2.0))), (0, 1, formula_cell("T*10"))],
+        ),
+        names,
+    ));
+    e.recalc();
+    assert_eq!(
+        e.value(SheetId(0), 0, 1),
+        Some(&num(10.0)),
+        "Alpha is NOT collection index 2: it sees the global T"
+    );
+    assert_eq!(
+        e.value(SheetId(1), 0, 1),
+        Some(&num(20.0)),
+        "Beta (collection index 2) sees its local T"
+    );
+    assert_eq!(
+        e.value(SheetId(0), 0, 2),
+        Some(&Value::Error(ErrorKind::Unsupported)),
+        "a name scoped to the skipped chartsheet resolves nowhere"
+    );
+}
+
+#[test]
+fn edit_through_sheet_local_name_reschedules_dependents() {
+    // Precedent extraction must resolve the LOCAL target on the scoped
+    // sheet, so an edit to that target reschedules the dependent.
+    let names = vec![
+        DefinedName {
+            name: "V".to_string(),
+            formula: "Sheet1!$A$1".to_string(),
+            sheet_scope: None,
+        },
+        DefinedName {
+            name: "V".to_string(),
+            formula: "Sheet2!$A$1".to_string(),
+            sheet_scope: Some(1),
+        },
+    ];
+    let mut e = Engine::load(build_two_sheets_indexed(
+        ("Sheet1", 0, vec![(0, 0, literal_cell(num(1.0)))]),
+        (
+            "Sheet2",
+            1,
+            vec![(0, 0, literal_cell(num(2.0))), (0, 1, formula_cell("V+1"))],
+        ),
+        names,
+    ));
+    e.recalc();
+    assert_eq!(e.value(SheetId(1), 0, 1), Some(&num(3.0)));
+    // Editing the LOCAL target (Sheet2!A1) must recompute Sheet2!B1 …
+    e.edit(CellId::new(SheetId(1), 0, 0), CellInput::Literal(num(40.0)));
+    assert_eq!(e.value(SheetId(1), 0, 1), Some(&num(41.0)));
+    // … and editing the GLOBAL's target (Sheet1!A1) must NOT change it.
+    e.edit(
+        CellId::new(SheetId(0), 0, 0),
+        CellInput::Literal(num(500.0)),
+    );
+    assert_eq!(e.value(SheetId(1), 0, 1), Some(&num(41.0)));
+}
+
 #[test]
 fn recalc_is_deterministic_and_idempotent() {
     let make = || {
@@ -576,12 +899,14 @@ fn build_two_sheets(
             Sheet {
                 name: s1.0.to_string(),
                 sheet_id: 1,
+                sheets_index: 0,
                 cells: mk(s1.1),
                 hidden_rows: std::collections::BTreeSet::new(),
             },
             Sheet {
                 name: s2.0.to_string(),
                 sheet_id: 2,
+                sheets_index: 1,
                 cells: mk(s2.1),
                 hidden_rows: std::collections::BTreeSet::new(),
             },
@@ -687,6 +1012,167 @@ fn vlookup_whole_column_via_defined_name() {
         e.value(s0(), 1, 0),
         Some(&Value::Error(ErrorKind::Na)),
         "named whole-column absent key → #N/A"
+    );
+}
+
+/// L2-A corpus shape (docs/l2-refusal-decomposition.md example 7, lane L2-A):
+/// a defined name whose body is a **`$`-anchored, sheet-qualified whole-column
+/// range** (`WC_ISIN_Lookup` = `WC_Underlyings!$A:$B`) used as an exact-match
+/// VLOOKUP `table_array`, with the corpus's trailing empty `range_lookup`
+/// argument (`VLOOKUP(key, name, 2, )` — omitted 4th arg coerces `Blank` →
+/// `FALSE` = exact). Must take the RFC-0001 used-extent walk exactly like the
+/// direct-reference whole-column path, not refuse.
+#[test]
+fn vlookup_exact_whole_column_dollar_anchored_defined_name() {
+    let names = vec![DefinedName {
+        name: "WC_ISIN_Lookup".to_string(),
+        formula: "WC_Underlyings!$A:$B".to_string(),
+        sheet_scope: None,
+    }];
+    let mut e = Engine::load(build_two_sheets(
+        (
+            "Sheet1",
+            vec![
+                (0, 0, literal_cell(txt("DE000AB1234"))), // A1: the key
+                // B1: the corpus formula shape, trailing empty 4th arg.
+                (
+                    0,
+                    1,
+                    formula_cell(
+                        "IF(ISERROR(VLOOKUP(A1,WC_ISIN_Lookup,2,)),\"\",VLOOKUP(A1,WC_ISIN_Lookup,2,))",
+                    ),
+                ),
+                // B2: the bare exact-match call, absent key → #N/A (no guess).
+                (1, 1, formula_cell("VLOOKUP(\"absent\",WC_ISIN_Lookup,2,)")),
+            ],
+        ),
+        (
+            "WC_Underlyings",
+            conv_table(&[
+                (0, 0, txt("DE000AB1234")),
+                (0, 1, txt("Underlying-1")),
+                (2, 0, txt("DE000CD5678")), // gap row 1 absent: sparse walk
+                (2, 1, txt("Underlying-2")),
+            ]),
+        ),
+        names,
+    ));
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 0, 1),
+        Some(&txt("Underlying-1")),
+        "$-anchored named whole-column exact match"
+    );
+    assert_eq!(
+        e.value(s0(), 1, 1),
+        Some(&Value::Error(ErrorKind::Na)),
+        "$-anchored named whole-column absent key → #N/A"
+    );
+}
+
+/// L2-A, the *actual* refusing corpus shape (workbook `89d88509…`, 1,959
+/// cells): the lookup key cell (`T8`) is **blank** (a template row), the named
+/// whole-column table's first column is all non-empty text — every populated
+/// cell a confirmed NoMatch, every absent row a truly-blank cell OXP-104 pins
+/// as NoMatch for a Blank key. OXP-104 H3 (RUN-2026-07-11-oracle01) pins
+/// `VLOOKUP(<blank>, A:B, 2, FALSE)` over exactly this whole-column no-match
+/// shape to `#N/A`, so `IF(ISERROR(VLOOKUP(…)),"",VLOOKUP(…))` computes `""` —
+/// no longer the extra-conservative `#UNSUPPORTED!` defer.
+#[test]
+fn vlookup_blank_key_no_match_named_whole_column_computes_na() {
+    let names = vec![DefinedName {
+        name: "WC_ISIN_Lookup".to_string(),
+        formula: "WC_Underlyings!$A:$B".to_string(),
+        sheet_scope: None,
+    }];
+    let mut e = Engine::load(build_two_sheets(
+        (
+            "Sheet1",
+            vec![
+                // T8 (A1 here) is left blank: the template-row key.
+                (
+                    0,
+                    1,
+                    formula_cell(
+                        "IF(ISERROR(VLOOKUP(A1,WC_ISIN_Lookup,2,)),\"\",VLOOKUP(A1,WC_ISIN_Lookup,2,))",
+                    ),
+                ),
+                (1, 1, formula_cell("VLOOKUP(A2,WC_ISIN_Lookup,2,)")), // bare: #N/A
+            ],
+        ),
+        (
+            "WC_Underlyings",
+            conv_table(&[
+                (0, 0, txt("All")),
+                (0, 1, txt("ISIN")),
+                (1, 0, txt("Energy - Brent Crude Oil")),
+                (1, 1, txt("XXCRUDEOIL")),
+                (2, 0, txt("Energy - Coal")),
+                (2, 1, txt("XXCOAL")),
+            ]),
+        ),
+        names,
+    ));
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 0, 1),
+        Some(&txt("")),
+        "blank key, no match: VLOOKUP → #N/A → ISERROR → \"\""
+    );
+    assert_eq!(
+        e.value(s0(), 1, 1),
+        Some(&Value::Error(ErrorKind::Na)),
+        "bare blank-key no-match VLOOKUP over named whole column → #N/A (OXP-104 H3)"
+    );
+}
+
+/// L2-A regression: MATCH exact over a whole-column and a whole-row range
+/// reaching it through a defined name takes the used-extent walks (RFC 0001 /
+/// RFC 0008) exactly like the direct-reference path — position is the absolute
+/// (relative-to-range-top/left) index, not the compacted one.
+#[test]
+fn match_exact_named_whole_column_and_whole_row() {
+    let names = vec![
+        DefinedName {
+            name: "KeyCol".to_string(),
+            formula: "Data!$A:$A".to_string(),
+            sheet_scope: None,
+        },
+        DefinedName {
+            name: "KeyRow".to_string(),
+            formula: "Data!$2:$2".to_string(),
+            sheet_scope: None,
+        },
+    ];
+    let mut e = Engine::load(build_two_sheets(
+        (
+            "Sheet1",
+            vec![
+                (0, 0, formula_cell("MATCH(\"k3\",KeyCol,0)")),
+                (1, 0, formula_cell("MATCH(30,KeyRow,0)")),
+            ],
+        ),
+        (
+            "Data",
+            conv_table(&[
+                (0, 0, txt("k1")),
+                (2, 0, txt("k3")), // A3 (gap at A2): absolute position 3
+                (1, 1, num(10.0)), // B2
+                (1, 3, num(30.0)), // D2 (gap at C2): absolute position 4
+            ]),
+        ),
+        names,
+    ));
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 0, 0),
+        Some(&num(3.0)),
+        "named whole-column exact MATCH → absolute row position"
+    );
+    assert_eq!(
+        e.value(s0(), 1, 0),
+        Some(&num(4.0)),
+        "named whole-row exact MATCH → absolute column position"
     );
 }
 
@@ -2202,6 +2688,203 @@ fn lambda_param_shadows_captured_same_name() {
     );
 }
 
+#[test]
+fn let_binding_drives_sequence_length_oxp200() {
+    // OXP-200 A8: SUM(LET(n, 3, SEQUENCE(n))) = 6 — a LET binding drives the
+    // length of a real dynamic-array function (not an array literal).
+    assert_eq!(
+        eval1("SUM(_xlfn.LET(_xlpm.n,3,_xlfn.SEQUENCE(_xlpm.n)))"),
+        Some(num(6.0))
+    );
+}
+
+#[test]
+fn let_aggregate_binding_oxp200() {
+    // OXP-200 A9: LET(x, SUM({1;2;3}), x*2) = 12 — a binding may hold an
+    // aggregate result.
+    assert_eq!(
+        eval1("_xlfn.LET(_xlpm.x,SUM({1;2;3}),_xlpm.x*2)"),
+        Some(num(12.0))
+    );
+}
+
+#[test]
+fn higher_order_probe_mirrors_over_real_sequence_oxp199() {
+    // OXP-199 column-B probe mirrors, over a real SEQUENCE source (the farm
+    // probes used SEQUENCE, the earlier tests the equivalent array literal):
+    // A5 MAP ×10 = 60; A6 REDUCE running sum = 10; A7 SCAN last = 6;
+    // A8 BYROW = 10; A9 MAKEARRAY r*c = 9.
+    assert_eq!(
+        eval1("SUM(_xlfn.MAP(_xlfn.SEQUENCE(3),_xlfn.LAMBDA(_xlpm.x,_xlpm.x*10)))"),
+        Some(num(60.0))
+    );
+    assert_eq!(
+        eval1("_xlfn.REDUCE(0,_xlfn.SEQUENCE(4),_xlfn.LAMBDA(_xlpm.a,_xlpm.b,_xlpm.a+_xlpm.b))"),
+        Some(num(10.0))
+    );
+    assert_eq!(
+        eval1(
+            "INDEX(_xlfn.SCAN(0,_xlfn.SEQUENCE(3),_xlfn.LAMBDA(_xlpm.a,_xlpm.b,_xlpm.a+_xlpm.b)),3)"
+        ),
+        Some(num(6.0))
+    );
+    // The exact OXP-199 A8 probe shape is `BYROW(SEQUENCE(2,2), …)`; a 2-D
+    // SEQUENCE currently refuses loudly (its fill order is unpinned — the
+    // lane-3a probe queue), so the BYROW-over-SEQUENCE mirror uses the 1-D
+    // form here; the 2×2 element-wise BYROW/BYCOL semantics are covered by the
+    // array-literal OXP-207 A6/A7 tests above.
+    assert_eq!(
+        eval1("SUM(_xlfn.BYROW(_xlfn.SEQUENCE(4),_xlfn.LAMBDA(_xlpm.r,SUM(_xlpm.r))))"),
+        Some(num(10.0))
+    );
+    assert_eq!(
+        eval1("SUM(_xlfn.MAKEARRAY(2,2,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.r*_xlpm.c)))"),
+        Some(num(9.0))
+    );
+}
+
+#[test]
+fn duplicate_let_param_is_load_rejected_oxp200() {
+    // OXP-200 edge: `LET(x,1,x,2,x)` is LOAD-REJECTED by Excel (validated at
+    // open, not a computed error). Mirror: the cell's program is refused at
+    // load — a ParseError-kind diagnostic visible BEFORE recalc, and the cell
+    // is `#UNSUPPORTED!`, never a silently-shadowed computed value.
+    let mut e = Engine::load(build(vec![(
+        0,
+        0,
+        formula_cell("_xlfn.LET(_xlpm.x,1,_xlpm.x,2,_xlpm.x)"),
+    )]));
+    let diags = e.diagnostics();
+    assert_eq!(diags.len(), 1, "load-time rejection must precede recalc");
+    assert_eq!(diags[0].kind, DiagnosticKind::ParseError);
+    assert!(diags[0].message.contains("duplicate LET parameter"));
+    assert!(diags[0].message.contains("OXP-200"));
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 0, 0),
+        Some(&Value::Error(ErrorKind::Unsupported))
+    );
+}
+
+#[test]
+fn duplicate_let_param_nested_is_load_rejected_oxp200() {
+    // The load-level validation must see a duplicate-param LET anywhere in the
+    // tree, not only at the formula head.
+    let mut e = Engine::load(build(vec![(
+        0,
+        0,
+        formula_cell("SUM(_xlfn.LET(_xlpm.a,1,_xlpm.a,2,_xlpm.a))"),
+    )]));
+    let diags = e.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].kind, DiagnosticKind::ParseError);
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 0, 0),
+        Some(&Value::Error(ErrorKind::Unsupported))
+    );
+}
+
+#[test]
+fn duplicate_let_param_edit_is_load_rejected_oxp200() {
+    // The programmatic-edit compile path must apply the same load-level
+    // rejection as workbook load.
+    let mut e = Engine::load(build(vec![(0, 0, literal_cell(num(1.0)))]));
+    e.recalc();
+    e.edit(
+        CellId {
+            sheet: s0(),
+            row: 0,
+            col: 0,
+        },
+        CellInput::Formula("=_xlfn.LET(_xlpm.x,1,_xlpm.x,2,_xlpm.x)".to_string()),
+    );
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 0, 0),
+        Some(&Value::Error(ErrorKind::Unsupported))
+    );
+    let diags = e.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].kind, DiagnosticKind::ParseError);
+    assert!(diags[0].message.contains("duplicate LET parameter"));
+}
+
+#[test]
+fn duplicate_let_param_shared_follow_on_is_load_rejected_oxp200() {
+    // A shared-formula follow-on expands its master's formula through the same
+    // compile path — a duplicate-param LET master must poison the follow-on at
+    // load too (the master's own cell likewise).
+    let mut e = Engine::load(build(vec![
+        (
+            0,
+            0,
+            shared_master_cell("_xlfn.LET(_xlpm.x,1,_xlpm.x,2,_xlpm.x)", 0, "A1:A2"),
+        ),
+        (1, 0, shared_follow_cell(0)),
+    ]));
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 0, 0),
+        Some(&Value::Error(ErrorKind::Unsupported))
+    );
+    assert_eq!(
+        e.value(s0(), 1, 0),
+        Some(&Value::Error(ErrorKind::Unsupported))
+    );
+    let diags = e.diagnostics();
+    assert_eq!(diags.len(), 2);
+    assert!(diags.iter().all(|d| d.kind == DiagnosticKind::ParseError));
+}
+
+#[test]
+fn nested_let_shadowing_outer_binding_is_not_a_duplicate() {
+    // Only a duplicate within ONE LET's own parameter list is load-rejected;
+    // an inner LET re-binding an outer LET's name is ordinary lexical
+    // shadowing: LET(x,1, LET(x,2, x)) = 2 evaluates normally (consistent with
+    // `lambda_param_shadows_captured_same_name`).
+    assert_eq!(
+        eval1("_xlfn.LET(_xlpm.x,1,_xlfn.LET(_xlpm.x,2,_xlpm.x))"),
+        Some(num(2.0))
+    );
+}
+
+#[test]
+fn duplicate_lambda_param_refuses_loudly() {
+    // A duplicate LAMBDA parameter list is NOT oracle-pinned (OXP-200 pinned
+    // only the duplicate-LET load rejection; Excel's open-time validation of a
+    // duplicate LAMBDA param is unprobed). Refuse loudly, never resolve the
+    // ambiguity by silent shadowing.
+    assert_eq!(
+        eval1("_xlfn.LET(_xlpm.f,_xlfn.LAMBDA(_xlpm.x,_xlpm.x,_xlpm.x),_xlpm.f(1,2))"),
+        Some(Value::Error(ErrorKind::Unsupported))
+    );
+}
+
+#[test]
+fn direct_lambda_application_spelling_refuses_loudly() {
+    // OXP-200 A7 pins `LET(x,5,LAMBDA(y,x+y))(10)` = 15 (closure capture — the
+    // semantics are covered via named application above). The direct `)(`
+    // SPELLING, however, is a parser-level loud refusal per the ratified
+    // RFC-0012 §10 (supporting it is a separate, RFC-gated `xl-ast` grammar
+    // change): the trailing `(10)` is an unconsumed token → ParseError →
+    // `#UNSUPPORTED!`. This test pins the loud-refusal posture so the gap is
+    // visible, never silent.
+    let mut e = Engine::load(build(vec![(
+        0,
+        0,
+        formula_cell("_xlfn.LET(_xlpm.x,5,_xlfn.LAMBDA(_xlpm.y,_xlpm.x+_xlpm.y))(10)"),
+    )]));
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 0, 0),
+        Some(&Value::Error(ErrorKind::Unsupported))
+    );
+    let diags = e.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].kind, DiagnosticKind::ParseError);
+}
+
 // ============================================================================
 // M2 lane 4 — dynamic-array SPILL (compute-only).
 //
@@ -2990,6 +3673,7 @@ fn shared_group_si_namespace_is_per_sheet() {
     let sheet1 = Sheet {
         name: "Sheet1".to_string(),
         sheet_id: 1,
+        sheets_index: 0,
         cells: BTreeMap::from([
             ((0, 0), shared_master_cell("B1+1", 0, "A1:A2")),
             ((1, 0), shared_follow_cell(0)),
@@ -3001,6 +3685,7 @@ fn shared_group_si_namespace_is_per_sheet() {
     let sheet2 = Sheet {
         name: "Sheet2".to_string(),
         sheet_id: 2,
+        sheets_index: 1,
         cells: BTreeMap::from([
             ((0, 0), shared_master_cell("B1*100", 0, "A1:A2")),
             ((1, 0), shared_follow_cell(0)),

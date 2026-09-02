@@ -107,12 +107,18 @@ bindings).
 
 ## Verify a workbook locally
 
-The canonical Verify v1 command is distributed with the benchmark/CLI build:
+The Verify v1 command ships as the `recalc` binary of the `xl-bench` crate in
+this tree. Build and run it from a clone:
 
 ```sh
-recalc verify OUTPUT.xlsx \
+cargo run --release -p xl-bench --bin recalc -- verify OUTPUT.xlsx \
   --policy recalc-policy.toml --json report.json
 ```
+
+The contract is specified in
+[`docs/specs/recalc-verify-v1.md`](docs/specs/recalc-verify-v1.md); the report
+and receipt schemas sit beside it. `xl-bench/tests/fixtures/verify-policy.toml`
+is a working policy file to start from.
 
 Exit `0` means PASS, `1` means a measured FAIL, and `2` means FALLBACK because
 the requested evidence or a safe calculation was unavailable. Reports follow

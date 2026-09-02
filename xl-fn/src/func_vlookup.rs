@@ -63,7 +63,16 @@
 //! blank one, unlike the raw `values_equal` contract). This resolves
 //! **OXP-104's clean half**; a populated match is trusted only when no
 //! *absent* row precedes it (the populated rows are contiguous from the top
-//! through the match), else it defers. In **approximate** mode a `Blank` key
+//! through the match), else it defers. A `Blank`-key scan that **completes
+//! with no match** returns `#N/A` (L2-A, `docs/l2-refusal-decomposition.md`):
+//! **OXP-104 H3** pins `VLOOKUP(<blank>, A:B, 2, FALSE)` over the whole
+//! column `{1, 2, <truly blank>, 4}` to `#N/A`, and OXP-104's blank-vs-blank
+//! NoMatch pin means the absent rows the walk cannot see are confirmed
+//! no-matches — so the used-extent answer equals the bounded walk's. Any
+//! unpinned `Blank` pair (`""`/`FALSE`/`0`-key-vs-blank-cell; OXP-171 queued)
+//! encountered mid-scan still Defers first, bit-for-bit unchanged. An
+//! ENTIRELY empty whole column with a `Blank` key still defers (never
+//! probed). In **approximate** mode a `Blank` key
 //! defers (`#UNSUPPORTED!`) uniformly — not only over a whole column, but
 //! over any `table_array` shape (bounded or whole-column), and likewise for
 //! a `Blank` *cell* the binary search actually probes, not only the key —
@@ -171,12 +180,12 @@ pub(crate) fn eval(_ctx: &EvalContext, args: &mut dyn CallArgs) -> Value {
     }
     let col = col_index as usize; // 1-based, validated 1..=width.
 
-    // Empty table (no rows): nothing to match → #N/A. On a whole column, keep
-    // deferring a Blank key rather than claim #N/A — an unchanged, extra-
-    // conservative guard from before this fix; not required by OXP-104 (which
-    // pins that a Blank key does not match a blank cell at all, so an
-    // invisible absent row is a confirmed no-match, not a hidden one), but
-    // left as-is here (out of scope for this fix).
+    // Empty table (no rows): nothing to match → #N/A. On a whole column, a
+    // Blank key still defers — kept bit-for-bit (L2-A condition 2). Unlike the
+    // populated no-match case below (pinned directly by OXP-104 H3), an
+    // ENTIRELY empty column was never probed: #N/A here would rest on
+    // composing the blank-vs-blank NoMatch pair alone, so the conservative
+    // defer stands until an OXP observes the empty-column shape.
     if rows.is_empty() {
         return if used_extent && matches!(lookup, Value::Blank) {
             Value::Error(ErrorKind::Unsupported)
@@ -208,11 +217,19 @@ pub(crate) fn eval(_ctx: &EvalContext, args: &mut dyn CallArgs) -> Value {
                 }
                 i
             }
-            // Same pre-existing, extra-conservative guard for the no-match
-            // case: keep deferring rather than claim #N/A here (unchanged).
-            Ok(None) if used_extent && matches!(lookup, Value::Blank) => {
-                return Value::Error(ErrorKind::Unsupported);
-            }
+            // No-match completion → #N/A, on the used-extent path too (L2-A).
+            // For a Blank key this is pinned, not composed: OXP-104 H3
+            // (RUN-2026-07-11-oracle01) observed `VLOOKUP(C1, A:B, 2, FALSE)`
+            // with C1 blank over the whole column {1, 2, <truly blank>, 4} →
+            // `#N/A`. Reaching this arm means every populated first-column
+            // cell was a confirmed NoMatch (any unpinned pair Defers → `Err`
+            // above, preserved bit-for-bit), and OXP-104 pins that a Blank key
+            // matches no truly-blank (absent) cell — so the invisible absent
+            // rows are confirmed no-matches, and the completed scan's #N/A
+            // equals the already-pinned bounded walk's answer. (Until this
+            // change the arm carried an extra-conservative Blank-key defer,
+            // which was the actual refusal behind the L2-A corpus shape —
+            // blank template-row keys over `WC_Underlyings!$A:$B`.)
             Ok(None) => return Value::Error(ErrorKind::Na),
             Err(k) => return Value::Error(k),
         }
@@ -601,6 +618,57 @@ mod tests {
                 oxp165_table(),
                 Scalar(num(2.0)),
                 Scalar(Value::Bool(true)),
+            ],
+        );
+        assert_eq!(got, Value::Error(ErrorKind::Unsupported));
+    }
+
+    /// OXP-104 (H3, RUN-2026-07-11-oracle01) — the used-extent view of OXP-104's
+    /// own whole-column fixture `A = {1, 2, <truly blank>, 4}` (B = 10/20/-/40):
+    /// `VLOOKUP(C1, A:B, 2, FALSE)` with C1 blank is pinned to **`#N/A`**. Every
+    /// populated first-column cell is a confirmed NoMatch (non-zero numbers) and
+    /// the absent row is a truly-blank cell, which OXP-104 pins as NoMatch for a
+    /// Blank key — so the completed scan's `#N/A` is fully determined by pinned
+    /// facts, same as the bounded walk already answers
+    /// (`oxp104_blank_key_over_bounded_column_no_zero_cell_is_na`). This is the
+    /// L2-A corpus shape (`docs/l2-refusal-decomposition.md`, `WC_ISIN_Lookup` =
+    /// `WC_Underlyings!$A:$B`, blank template-row keys over an all-text column).
+    #[test]
+    fn oxp104_blank_key_no_match_over_whole_column_is_na() {
+        let got = eval_direct(
+            eval,
+            vec![
+                Scalar(Value::Blank),
+                UsedRows(vec![
+                    (0, vec![num(1.0), num(10.0)]),
+                    (1, vec![num(2.0), num(20.0)]),
+                    (3, vec![num(4.0), num(40.0)]),
+                ]),
+                Scalar(num(2.0)),
+                Scalar(Value::Bool(false)),
+            ],
+        );
+        assert_eq!(got, Value::Error(ErrorKind::Na));
+    }
+
+    /// PRESERVED bit-for-bit (L2-A condition 2): an unpinned Defer *pair* met
+    /// mid-scan — a populated `""` first-column cell against a Blank key
+    /// (OXP-171 queued) — still aborts the whole-column scan with
+    /// `#UNSUPPORTED!`; the no-match `#N/A` above never bypasses `exact_eq`'s
+    /// pair table.
+    #[test]
+    fn blank_key_whole_column_with_empty_text_cell_still_defers() {
+        let got = eval_direct(
+            eval,
+            vec![
+                Scalar(Value::Blank),
+                UsedRows(vec![
+                    (0, vec![num(1.0), num(10.0)]),
+                    (1, vec![txt(""), num(20.0)]),
+                    (3, vec![num(4.0), num(40.0)]),
+                ]),
+                Scalar(num(2.0)),
+                Scalar(Value::Bool(false)),
             ],
         );
         assert_eq!(got, Value::Error(ErrorKind::Unsupported));

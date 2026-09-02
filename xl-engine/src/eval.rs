@@ -112,7 +112,7 @@ pub(crate) fn eval_expr(
             {
                 v.clone()
             } else {
-                match resolve_name(n, env) {
+                match resolve_name(n, cur, env) {
                     Some(resolved) => eval_expr(
                         &resolved,
                         anchor,
@@ -127,7 +127,7 @@ pub(crate) fn eval_expr(
                     None => {
                         diags.push((
                             DiagnosticKind::UnsupportedConstruct,
-                            format!("unsupported defined name: {}", n.name),
+                            format!("unsupported defined name: {n}"),
                         ));
                         Value::Error(ErrorKind::Unsupported)
                     }
@@ -632,8 +632,32 @@ fn eval_call(
                     .collect();
                 apply_lambda(&l, &argv, anchor, cur, values, env, ctx, diags)
             }
+            // A bound ERROR invoked like a function propagates (ordinary
+            // error propagation; in particular a refusal sentinel such as
+            // `#UNSUPPORTED!` must propagate distinctly, never be downgraded
+            // to a plausible computed error — RFC-0012 §4 composition seam).
+            Value::Error(k) => Value::Error(*k),
+            // A bound non-lambda, non-error value called like a function
+            // refuses loudly — never silently wrong.
             _ => Value::Error(ErrorKind::Value),
         };
+    }
+    // Sandbox boundary: these Excel functions require a network or live data
+    // provider. The engine must never attempt the call or turn it into a
+    // generic unknown-function result: the stable sentinel is `#BLOCKED!` and
+    // the diagnostic makes the refusal visible to policy/report consumers.
+    if matches!(
+        name.canonical.as_str(),
+        "WEBSERVICE" | "RTD" | "STOCKHISTORY"
+    ) {
+        diags.push((
+            DiagnosticKind::UnsupportedConstruct,
+            format!(
+                "blocked external-data function {}: network/live-provider access is disabled",
+                name.canonical
+            ),
+        ));
+        return Value::Error(ErrorKind::Blocked);
     }
     let Some(spec) = xl_fn::lookup(&name.canonical) else {
         diags.push((
@@ -698,7 +722,26 @@ fn eval_special_form(
     lex: LexEnv<'_>,
 ) -> Option<Value> {
     let v = match canonical {
-        "LET" => eval_let(args, anchor, cur, values, env, ctx, diags, lex),
+        "LET" => {
+            // Backstop for the load-level duplicate-LET rejection (OXP-200:
+            // Excel load-rejects, so every cell program is screened at compile
+            // time — see `duplicate_let_rejection` in lib.rs). A duplicate can
+            // only reach eval through a path that skipped compilation screening
+            // (e.g. a defined-name body); refuse loudly rather than silently
+            // shadow.
+            if let Some(dup) = crate::lambda::duplicate_let_binding(args) {
+                diags.push((
+                    DiagnosticKind::UnsupportedConstruct,
+                    format!(
+                        "duplicate LET parameter `{dup}`: Excel load-rejects this \
+                         (OXP-200); refusing rather than shadow"
+                    ),
+                ));
+                Value::Error(ErrorKind::Unsupported)
+            } else {
+                eval_let(args, anchor, cur, values, env, ctx, diags, lex)
+            }
+        }
         "LAMBDA" => eval_lambda_literal(args, diags, lex),
         "MAP" => eval_map(args, anchor, cur, values, env, ctx, diags, lex),
         "REDUCE" => eval_reduce(args, anchor, cur, values, env, ctx, diags, lex),
@@ -846,7 +889,22 @@ fn eval_lambda_literal(args: &[Expr], diags: &mut DiagnosticSink, lex: LexEnv<'_
         let ExprKind::Name(nr) = &peel_paren(p).kind else {
             return Value::Error(ErrorKind::Value);
         };
-        params.push(canon_name(&nr.name));
+        let name = canon_name(&nr.name);
+        // A duplicate LAMBDA parameter list is NOT oracle-pinned (OXP-200
+        // pinned only the duplicate-LET load rejection; Excel's open-time
+        // validation of a duplicate LAMBDA parameter is unprobed). Refuse
+        // loudly rather than resolve the ambiguity by silent shadowing.
+        if params.contains(&name) {
+            diags.push((
+                DiagnosticKind::UnsupportedConstruct,
+                format!(
+                    "duplicate LAMBDA parameter `{name}`: Excel's behavior is \
+                     not oracle-pinned (OXP-200 covers only LET); refusing"
+                ),
+            ));
+            return Value::Error(ErrorKind::Unsupported);
+        }
+        params.push(name);
     }
     make_lambda(params, body.clone(), snapshot(lex))
 }
@@ -1378,7 +1436,7 @@ impl CallArgs for EngineArgs<'_, '_> {
                     let _ = visit(&Value::Error(ErrorKind::Unsupported));
                 }
             },
-            ExprKind::Name(n) => match resolve_name(n, self.env) {
+            ExprKind::Name(n) => match resolve_name(n, self.cur, self.env) {
                 Some(resolved) => {
                     stream_resolved_name(&resolved, self.cur, self.values, self.env, visit)
                 }
@@ -1451,7 +1509,7 @@ impl CallArgs for EngineArgs<'_, '_> {
                 lhs,
                 rhs,
             } => resolve_range(lhs, rhs, self.cur, self.env).and_then(|sr| bounded_dims(&sr)),
-            ExprKind::Name(n) => match resolve_name(n, self.env) {
+            ExprKind::Name(n) => match resolve_name(n, self.cur, self.env) {
                 Some(resolved) => resolved_range_dims(&resolved, self.cur, self.env),
                 None => None,
             },
@@ -1519,7 +1577,7 @@ impl CallArgs for EngineArgs<'_, '_> {
                 Some(sr) => rows_of_range(&sr, self.values, visit),
                 None => Err(ErrorKind::Unsupported),
             },
-            ExprKind::Name(n) => match resolve_name(n, self.env) {
+            ExprKind::Name(n) => match resolve_name(n, self.cur, self.env) {
                 Some(resolved) => {
                     rows_of_resolved_name(&resolved, self.cur, self.values, self.env, visit)
                 }
@@ -1597,7 +1655,7 @@ impl CallArgs for EngineArgs<'_, '_> {
                 Some(sr) => used_rows_of_range(&sr, self.values, visit),
                 None => Err(ErrorKind::Unsupported),
             },
-            ExprKind::Name(n) => match resolve_name(n, self.env) {
+            ExprKind::Name(n) => match resolve_name(n, self.cur, self.env) {
                 Some(resolved) => {
                     used_rows_of_resolved_name(&resolved, self.cur, self.values, self.env, visit)
                 }
@@ -1685,7 +1743,7 @@ impl CallArgs for EngineArgs<'_, '_> {
                 Some(sr) => used_cols_of_range(&sr, self.values, visit),
                 None => Err(ErrorKind::Unsupported),
             },
-            ExprKind::Name(n) => match resolve_name(n, self.env) {
+            ExprKind::Name(n) => match resolve_name(n, self.cur, self.env) {
                 Some(resolved) => {
                     used_cols_of_resolved_name(&resolved, self.cur, self.values, self.env, visit)
                 }
@@ -1799,7 +1857,7 @@ impl CallArgs for EngineArgs<'_, '_> {
                 Ok(())
             }
             ExprKind::Name(n) => {
-                match resolve_name(n, self.env) {
+                match resolve_name(n, self.cur, self.env) {
                     Some(resolved) => stream_resolved_name_tagged(
                         &resolved,
                         self.cur,
@@ -2110,7 +2168,7 @@ fn classify_shape(expr: &Expr, cur: SheetId, env: &WbIndex) -> ArgShape {
             // as a scalar.
             _ => ArgShape::Scalar,
         },
-        ExprKind::Name(n) => match resolve_name(n, env) {
+        ExprKind::Name(n) => match resolve_name(n, cur, env) {
             Some(resolved) => classify_shape(&resolved, cur, env),
             None => ArgShape::Scalar,
         },

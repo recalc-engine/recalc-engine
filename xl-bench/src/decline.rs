@@ -121,7 +121,7 @@ const MAX_COL_1BASED: u32 = MAX_COL0 + 1;
 /// Reference-transformer functions the engine supports **outside** the registry
 /// (RFC-0003; `xl-engine/src/refx.rs::is_ref_returning`). A call to one of these
 /// is *not* an unimplemented function even though `xl_fn::lookup` misses it.
-const REF_TRANSFORMERS: &[&str] = &["OFFSET", "INDIRECT", "ANCHORARRAY"];
+pub(crate) const REF_TRANSFORMERS: &[&str] = &["OFFSET", "INDIRECT", "ANCHORARRAY"];
 
 /// Special-form functions the engine evaluates itself (M2 lane 2), dispatched in
 /// `xl-engine/src/eval.rs::eval_special_form` **before** the registry lookup, so
@@ -131,7 +131,7 @@ const REF_TRANSFORMERS: &[&str] = &["OFFSET", "INDIRECT", "ANCHORARRAY"];
 /// refusal that belongs in `other_unattributed`, never in `unimplemented_fn`.
 /// `ISOMITTED` is recognized-but-deferred here; it is treated as supported so a
 /// rare `ISOMITTED` decline is not overstated as a missing function.
-const SPECIAL_FORMS: &[&str] = &[
+pub(crate) const SPECIAL_FORMS: &[&str] = &[
     "LET",
     "LAMBDA",
     "MAP",
@@ -166,7 +166,7 @@ const VOLATILE_ANTITARGETS: &[&str] = &["TODAY", "NOW"];
 /// body of its own; a **shared** follow-on is resolved by translating its group
 /// master (see [`translate`] / [`SharedMaster`]), while an **array**/data-table
 /// follow-on stays unmaterialized ([`DeclineClass::ArrayFollowonUnmaterialized`]).
-const BODYLESS_PLACEHOLDER: &str = "<shared/array follow-on, no formula body>";
+pub(crate) const BODYLESS_PLACEHOLDER: &str = "<shared/array follow-on, no formula body>";
 
 /// A single declined cell's root-cause class. See the module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -372,7 +372,7 @@ fn fn_category(canonical: &str, defined_names_uc: &BTreeSet<String>) -> FnCatego
 /// external ref these guards now miss is an *under*-count — the safe direction
 /// for a published number, never a flattering over-count.
 #[must_use]
-fn has_external_bracket(text: &str) -> bool {
+pub(crate) fn has_external_bracket(text: &str) -> bool {
     let b = text.as_bytes();
     let mut in_str = false;
     let mut i = 0;
@@ -486,7 +486,7 @@ fn translate_ref(r: &Reference, span: xl_ast::Span, drow: i64, dcol: i64) -> Exp
 /// leaving absolute axes, sheet qualifiers, R1C1 refs, defined names, and
 /// literals untouched. Mirrors `xl-engine/src/shared.rs::translate` exactly.
 #[must_use]
-fn translate(expr: &Expr, drow: i64, dcol: i64) -> Expr {
+pub(crate) fn translate(expr: &Expr, drow: i64, dcol: i64) -> Expr {
     let kind = match &expr.kind {
         ExprKind::Ref(r) => return translate_ref(r, expr.span, drow, dcol),
         ExprKind::Name(_) => expr.kind.clone(),
@@ -822,7 +822,7 @@ fn walk_precedents(
 /// Resolve a formula's precedents down to the subset that are themselves
 /// declined cells (the only precedents a cascade can flow through).
 #[must_use]
-fn resolve_declined_precedents(
+pub(crate) fn resolve_declined_precedents(
     expr: &Expr,
     cur: SheetId,
     sheet_map: &BTreeMap<String, SheetId>,
@@ -944,6 +944,12 @@ pub struct WorkbookDeclineResult {
     /// before the tiebreak picked a single winner. Bounds how much the
     /// `external > unimplemented_fn` tiebreak could shift the external share.
     pub multi_cause_cells: usize,
+    /// The `other_shared_expanded` sub-bucket, cell by cell, in `CellId` order:
+    /// every would-expand shared follow-on counted in
+    /// [`other_shared_expanded`](Self::other_shared_expanded). Consumed by the
+    /// L2 refusal-site decomposition ([`crate::l2site`]) so the two tools
+    /// reconcile on the identical cell set by construction.
+    pub shared_expanded_cells: Vec<CellId>,
     /// Per-declined-cell classification, in `CellId` order (for tests/debug).
     pub classified: Vec<(CellId, DeclineClass)>,
     /// Sheet display names indexed by [`SheetId`] (`sheet_names[sid.0]`), so a
@@ -1161,6 +1167,7 @@ pub fn attribute_cells(
                 // A shared follow-on that expanded cleanly (master parsed) yet
                 // still declines — a runtime refusal, NOT a shared-expansion gap.
                 result.other_shared_expanded += 1;
+                result.shared_expanded_cells.push(cid);
             } else if p.bodyless {
                 result.other_bodyless += 1;
             } else if !p.parsed_ok {

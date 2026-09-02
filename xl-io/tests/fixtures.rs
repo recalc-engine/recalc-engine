@@ -250,6 +250,8 @@ fn defined_names_workbook_and_sheet_scoped() {
     let local = wb.defined_names.iter().find(|d| d.name == "Local").unwrap();
     assert_eq!(local.formula, "Sheet1!$B$1");
     assert_eq!(local.sheet_scope, Some(0));
+    // With no skipped sheets, the collection index equals the tab position.
+    assert_eq!(wb.sheet_at(0).unwrap().sheets_index, 0);
 }
 
 #[test]
@@ -442,6 +444,14 @@ fn very_hidden_vba_module_sheets_with_empty_or_missing_r_id_are_skipped() {
     assert!(wb.sheet("Code").is_none());
     assert!(wb.sheet("Module1").is_none());
     assert_eq!(wb.flags.skipped_sheets, 2);
+
+    // `sheets_index` records each retained sheet's position in the FULL
+    // `<sheets>` collection — the `definedName@localSheetId` index space
+    // (ECMA-376 §18.2.6) — so the skipped `Code` entry at collection
+    // index 1 shifts `dlgAddRows` to collection index 2 even though it loads
+    // at tab position 1.
+    assert_eq!(wb.sheet_at(0).unwrap().sheets_index, 0);
+    assert_eq!(wb.sheet_at(1).unwrap().sheets_index, 2);
 }
 
 /// Regression test for the next Enron-corpus layer: real Excel workbooks

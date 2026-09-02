@@ -164,7 +164,7 @@ pub(crate) fn resolve_ref_expr(
             Some(sr) => RefExpr::Range(sr),
             None => RefExpr::Unsupported,
         },
-        ExprKind::Name(n) => match resolve_name(n, env) {
+        ExprKind::Name(n) => match resolve_name(n, cur, env) {
             Some(resolved) => {
                 resolve_ref_expr(&resolved, anchor, cur, values, env, ctx, diags, depth)
             }
@@ -497,7 +497,20 @@ fn resolve_indirect(
         // #UNSUPPORTED!; a genuinely *undefined* name → #REF! (Excel's result for
         // INDIRECT of an unresolvable name). This replaces a blanket #REF! that
         // masqueraded as deliberate Excel behavior for every named-range INDIRECT.
-        ExprKind::Name(n) => match resolve_name(n, env) {
+        //
+        // A sheet-QUALIFIED name (`INDIRECT("Sheet2!n")`) is carved out of the
+        // `None → #REF!` mapping: which scope a qualified name reference
+        // selects is unpinned (lane L2-D; `resolve_name` refuses it), so
+        // emitting the plausible #REF! would be a guess — refuse loudly
+        // instead until the confirmation probe lands.
+        ExprKind::Name(n) if n.sheet.is_some() => {
+            diags.push((
+                DiagnosticKind::UnsupportedConstruct,
+                format!("unsupported defined name: {n}"),
+            ));
+            RefExpr::Unsupported
+        }
+        ExprKind::Name(n) => match resolve_name(n, cur, env) {
             Some(resolved) => {
                 resolve_ref_expr(&resolved, anchor, cur, values, env, ctx, diags, depth)
             }
