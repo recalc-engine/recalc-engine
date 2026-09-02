@@ -115,6 +115,22 @@ fn usage_errors_exit_64() {
         vec![
             "verify",
             "book.xlsx",
+            "--excel-result",
+            "e.xlsx",
+            "--excel-build",
+            "",
+        ],
+        vec![
+            "verify",
+            "book.xlsx",
+            "--excel-result",
+            "e.xlsx",
+            "--excel-build",
+            "  ",
+        ],
+        vec![
+            "verify",
+            "book.xlsx",
             "--baseline",
             "b.xlsx",
             "--excel-result",

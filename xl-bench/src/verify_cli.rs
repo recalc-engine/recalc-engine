@@ -125,6 +125,14 @@ pub fn run_v1(parsed: &VerifyArgs, program: &str) -> u8 {
         eprintln!("{program} verify: --excel-result and --excel-build must be supplied together");
         return 64;
     }
+    if parsed
+        .excel_build
+        .as_deref()
+        .is_some_and(|label| label.trim().is_empty())
+    {
+        eprintln!("{program} verify: --excel-build requires a non-empty build label");
+        return 64;
+    }
     if parsed.baseline.is_some() && parsed.excel_result.is_some() {
         eprintln!(
             "{program} verify: choose one comparison source: --baseline or --excel-result, not both"
@@ -239,6 +247,20 @@ mod tests {
             ..VerifyArgs::default()
         };
         assert_eq!(run_v1(&parsed, "recalc"), 64);
+    }
+
+    #[test]
+    fn run_v1_rejects_a_blank_excel_build_label_as_usage() {
+        for label in ["", "   "] {
+            let parsed = VerifyArgs {
+                input: PathBuf::from("tests/fixtures/clean_values.xlsx"),
+                excel_result: Some(PathBuf::from("tests/fixtures/clean_values.xlsx")),
+                excel_build: Some(label.to_string()),
+                quiet: true,
+                ..VerifyArgs::default()
+            };
+            assert_eq!(run_v1(&parsed, "recalc"), 64, "label {label:?}");
+        }
     }
 
     #[test]
