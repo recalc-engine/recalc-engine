@@ -1,6 +1,8 @@
 [package]
 name = "recalc-cli"
-version.workspace = true
+# The CLI is versioned on its own (release tags are `cli-v<this>`); the library
+# crates keep the workspace version.
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
