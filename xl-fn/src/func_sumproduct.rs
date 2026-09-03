@@ -1,6 +1,13 @@
 //! `SUMPRODUCT` — sum the products of corresponding array elements.
 //!
 //! # Provenance
+//! Array-context arguments (2026-09-04): the direct farm pin for plain-authored
+//! range operators inside SUMPRODUCT is **queued as OXP-235**
+//! (`docs/oracle-experiments.md`); until it runs, the computed cases rest on
+//! OXP-201 #1/#2/#3/#4/#6/#7/#9 (computed-array sources) generalized through the
+//! lane-6 range materialization, and the FUSE transition decomposition of
+//! 2026-09-04 (`docs/sumproduct-array-ctx-decomposition-2026-09-04.md`:
+//! `unsupported→mismatch` = 0).
 //! Behavior contract: `docs/specs/SUMPRODUCT.md` (which cites the Microsoft Learn
 //! `SUMPRODUCT` page, verified 2026-07-08). Two rules are quoted verbatim from
 //! that page and drive this evaluator:
