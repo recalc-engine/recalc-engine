@@ -39,6 +39,15 @@
 //! A **scalar** `array` argument that is [`Value::Blank`] (a bare empty-cell
 //! reference) hits the same unresolved scalar-blank question as `MAX`/`MIN`:
 //! count as `0` or exclude? Deferred to `#UNSUPPORTED!`, mirroring `MAX`.
+//!
+//! # Array-position arguments (M2 lane 6 follow-up, 2026-09-04)
+//! An argument in a range/array position is evaluated under the consumed-array
+//! gate (RFC-0011; `docs/plans/2026-07-14-consumed-array-eval-spec.md` §2).
+//! A materialized multi-cell array reaching this function is **refused** with a
+//! loud `#UNSUPPORTED!` plus an engine diagnostic (spec §4, born-refusing
+//! boundary): only the SUM/SUMPRODUCT consumers are oracle-pinned (OXP-201), and
+//! the legacy alternative — a silent, host-row-dependent implicit intersection —
+//! is a "never silently wrong" violation. Plain ranges are unchanged.
 
 use std::ops::ControlFlow;
 
@@ -80,7 +89,11 @@ fn collect_array_numbers(args: &mut dyn CallArgs) -> Result<Vec<f64>, ErrorKind>
     let mut xs: Vec<f64> = Vec::new();
     match args.shape(0) {
         ArgShape::Omitted | ArgShape::Scalar => {
-            let v = args.eval_scalar(0);
+            // Array position: evaluate under the array-context gate, so an operator
+            // expression over a range materializes (and the scalar coercion below
+            // refuses it loudly — unpinned for this function) instead of being
+            // implicit-intersected into a silent host-row-dependent value.
+            let v = args.eval_scalar_array_arg(0);
             // A scalar Blank array is oracle-deferred (count-as-0 vs exclude),
             // mirroring MAX/MIN — see module docs.
             if v.is_blank() {

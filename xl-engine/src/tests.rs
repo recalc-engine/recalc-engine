@@ -2448,6 +2448,265 @@ fn consumed_array_counta_still_refuses() {
     );
 }
 
+// ── SUMPRODUCT consumed-array arguments — the SAME array-context gate as SUM ──
+//
+// A *computed* SUMPRODUCT argument (an operator applied to a range) is an
+// array-position argument: Excel array-evaluates it in every version, never
+// implicit-intersects it. Pins: OXP-201 #6 `SUMPRODUCT(SEQUENCE(3),SEQUENCE(3))`
+// = 14 and #9 `SUMPRODUCT(--(SEQUENCE(3)>1))` = 2 (computed arrays in
+// SUMPRODUCT positions; comparison → bool array → `--` coercion; a single
+// array sums its elements), composed with the broadcasting rules (a) OXP-201
+// #1 and (b) OXP-201 #2/#7 over a consumed range materialized by the RFC-0011
+// gate (`docs/plans/2026-07-14-consumed-array-eval-spec.md` §2a/§3).
+//
+// Fixture: A1:A7 = ab, ac, bx, -cd, cz, ce, df; B1:B7 = 1..7. The host cell is
+// D1 (in-band with the ranges' rows — the position where legacy implicit
+// intersection silently picked row 1) or D9 (off-band — where it gave the
+// OXP-163 `#VALUE!`). Both hosts must agree: array evaluation is host-independent.
+
+/// Build the SUMPRODUCT fixture with `formula` in column D of `host_row`
+/// (0-based) and return its value plus whether the cell carries an
+/// `UnsupportedConstruct` diagnostic.
+fn sp_eval(formula: &str, host_row: u32) -> (Option<Value>, bool) {
+    let mut cells = Vec::new();
+    for (i, t) in ["ab", "ac", "bx", "-cd", "cz", "ce", "df"]
+        .iter()
+        .enumerate()
+    {
+        cells.push((i as u32, 0, literal_cell(Value::text(t))));
+        cells.push((i as u32, 1, literal_cell(num((i + 1) as f64))));
+    }
+    cells.push((host_row, 3, formula_cell(formula)));
+    let mut e = Engine::load(build(cells));
+    e.recalc();
+    let loud = e
+        .diagnostics_for(s0(), host_row, 3)
+        .iter()
+        .any(|d| d.kind == DiagnosticKind::UnsupportedConstruct);
+    (e.value(s0(), host_row, 3).cloned(), loud)
+}
+
+/// Assert `formula` computes `expected` from BOTH the in-band (D1) and the
+/// off-band (D9) host — never a host-dependent implicit intersection.
+fn assert_sp_both_hosts(formula: &str, expected: Value) {
+    for host_row in [0, 8] {
+        let (v, _) = sp_eval(formula, host_row);
+        assert_eq!(
+            v.as_ref(),
+            Some(&expected),
+            "{formula} at host row {}",
+            host_row + 1
+        );
+    }
+}
+
+/// Assert `formula` is a LOUD `#UNSUPPORTED!` (value + engine diagnostic) from
+/// both hosts — never a silent scalar, never the off-band `#VALUE!`.
+fn assert_sp_loud_refusal_both_hosts(formula: &str) {
+    for host_row in [0, 8] {
+        let (v, loud) = sp_eval(formula, host_row);
+        assert_eq!(
+            v.as_ref(),
+            Some(&Value::Error(ErrorKind::Unsupported)),
+            "{formula} at host row {} must be #UNSUPPORTED!",
+            host_row + 1
+        );
+        assert!(
+            loud,
+            "{formula} at host row {} must carry an UnsupportedConstruct diagnostic",
+            host_row + 1
+        );
+    }
+}
+
+/// `SUMPRODUCT(--(A1:A7="cz"))` = 1: comparison → bool array, `--` coerces
+/// element-wise (OXP-201 #9 shape), one match. Was a silent 0 in-band.
+#[test]
+fn sumproduct_double_negated_range_comparison_counts_matches() {
+    assert_sp_both_hosts("SUMPRODUCT(--(A1:A7=\"cz\"))", num(1.0));
+}
+
+/// `SUMPRODUCT((A1:A7="cz")*B1:B7)` = 5: bool array × same-shape number array
+/// (rule b, OXP-201 #2/#7) picks B5. Was a silent 0 in-band.
+#[test]
+fn sumproduct_range_comparison_times_range() {
+    assert_sp_both_hosts("SUMPRODUCT((A1:A7=\"cz\")*B1:B7)", num(5.0));
+}
+
+/// `SUMPRODUCT(B1:B7*2)` = 56: range × scalar (rule a, OXP-201 #1), then the
+/// single-array sum. Was a silent 2 (row 1 intersected) in-band.
+#[test]
+fn sumproduct_range_times_scalar() {
+    assert_sp_both_hosts("SUMPRODUCT(B1:B7*2)", num(56.0));
+}
+
+/// Two computed/reference arguments of the same shape multiply positionally:
+/// `SUMPRODUCT(B1:B7*2,B1:B7)` = 2·Σb² = 280, and a compound condition
+/// `SUMPRODUCT((B1:B7>3)*(A1:A7="cz"))` = 1.
+#[test]
+fn sumproduct_computed_and_reference_arguments_zip_positionally() {
+    assert_sp_both_hosts("SUMPRODUCT(B1:B7*2,B1:B7)", num(280.0));
+    assert_sp_both_hosts("SUMPRODUCT((B1:B7>3)*(A1:A7=\"cz\"))", num(1.0));
+}
+
+/// Regression: plain reference arguments are untouched by the gate.
+/// `SUMPRODUCT(B1:B7,B1:B7)` = 140 from both hosts.
+#[test]
+fn sumproduct_reference_arguments_unchanged() {
+    assert_sp_both_hosts("SUMPRODUCT(B1:B7,B1:B7)", num(140.0));
+}
+
+/// Function broadcasting over a range (`LEN(range)`, `LEFT(range,1)`,
+/// `MID(range,…)`) is NOT oracle-pinned: it must be a LOUD `#UNSUPPORTED!`
+/// with a diagnostic — exactly as inside SUM — never the silent scalar 2 that
+/// implicit intersection produced in-band, never the off-band `#VALUE!`.
+#[test]
+fn sumproduct_function_broadcast_over_range_refuses_loudly() {
+    assert_sp_loud_refusal_both_hosts("SUMPRODUCT(LEN(A1:A7))");
+    assert_sp_loud_refusal_both_hosts("SUMPRODUCT(--(LEFT(A1:A7,1)=\"c\"))");
+    assert_sp_loud_refusal_both_hosts("SUMPRODUCT((MID(A1:A7,2,1)=\"c\")*B1:B7)");
+    // The SUM twin stays loud too (the shared gate, unchanged).
+    assert_sp_loud_refusal_both_hosts("SUM(LEN(A1:A7))");
+}
+
+/// The variant-inspecting `IS*` functions used to return a silent `FALSE` for
+/// a materialized multi-cell array (so `SUM(ISNUMBER(range)*1)` was a silent
+/// 0). Element-wise `IS*` over an array is unpinned → loud `#UNSUPPORTED!`.
+#[test]
+fn sumproduct_and_sum_is_function_over_range_refuse_loudly() {
+    assert_sp_loud_refusal_both_hosts("SUMPRODUCT(ISNUMBER(B1:B7)*1)");
+    assert_sp_loud_refusal_both_hosts("SUMPRODUCT(--ISTEXT(A1:A7))");
+    assert_sp_loud_refusal_both_hosts("SUM(ISNUMBER(B1:B7)*1)");
+    assert_sp_loud_refusal_both_hosts("SUM(ISERROR(B1:B7)*1)");
+    assert_sp_loud_refusal_both_hosts("SUM(ISNA(B1:B7)*1)");
+    assert_sp_loud_refusal_both_hosts("SUM(ISERR(B1:B7)*1)");
+}
+
+/// Born-refusing boundary, unchanged: a whole-column computed argument
+/// (`A:A*2`) refuses at the gate (spec §4.1 / OXP-113 posture), and the 1×1
+/// scalar-broadcast mismatch stays deferred (OXP-115, scalar branch open).
+#[test]
+fn sumproduct_unbounded_and_scalar_broadcast_still_refuse() {
+    assert_sp_loud_refusal_both_hosts("SUMPRODUCT(A:A*2)");
+    for host_row in [0, 8] {
+        let (v, _) = sp_eval("SUMPRODUCT(B1:B7*2,3)", host_row);
+        assert_eq!(v, Some(Value::Error(ErrorKind::Unsupported)));
+    }
+}
+
+// ── Audit: computed expressions in OTHER functions' array positions ──────────
+//
+// At top level (outside any array-context aggregator) a lazy operator
+// expression over a range in an array-position argument used to be evaluated in
+// scalar context — a silent implicit intersection (`LARGE(B1:B7*1,1)` = 1
+// in-band, `#VALUE!` off-band; Excel: 7). Computing it is not on the
+// OXP-201 pinned list for those functions, so it is now a LOUD refusal.
+// Nested inside an array-context aggregator the same expressions keep their
+// (already pinned) array evaluation.
+
+#[test]
+fn top_level_operator_over_range_in_array_position_refuses_loudly() {
+    for f in [
+        "LARGE(B1:B7*1,1)",
+        "LOOKUP(5,B1:B7*1)",
+        "MATCH(10,B1:B7*2,0)",
+        "INDEX(B1:B7*2,3)",
+        "OR(B1:B7>3)",
+        "AND(B1:B7>3)",
+        "SUMIF(B1:B7*1,\">3\")",
+        "COUNTIF(B1:B7*1,\">3\")",
+        "_xlfn.SORT(B1:B7*1)",
+        "_xlfn.TEXTJOIN(\",\",TRUE,A1:A7&\"x\")",
+        "ROWS(B1:B7*1)",
+        "COLUMNS(B1:B7*1)",
+    ] {
+        assert_sp_loud_refusal_both_hosts(f);
+    }
+}
+
+/// Review B1: an `IF`/`CHOOSE` root over ranges in a criteria/sum position
+/// materializes under the gate; a walk cannot consume it, so it must be a loud
+/// refusal from both hosts — never the silent `0` a scalar-context
+/// re-evaluation produced (Excel: 22 for every formula here).
+#[test]
+fn if_and_choose_roots_in_array_positions_refuse_loudly() {
+    for f in [
+        "SUMIF(IF(TRUE,B1:B7,K1:K7),\">3\")",
+        "SUMIF(IF(TRUE,B1:B7,K1:K7),\">3\",K1:K7)",
+        "SUMIF(CHOOSE(1,B1:B7,K1:K7),\">3\")",
+        "SUMIF(IF(A1=\"ab\",B1:B7,K1:K7),\">3\")",
+        "COUNTIF(CHOOSE(1,B1:B7,K1:K7),\">3\")",
+        "INDEX(IF(TRUE,B1:B7,K1:K7),3)",
+        "MATCH(5,IF(TRUE,B1:B7,K1:K7),0)",
+        "LOOKUP(5,IF(TRUE,B1:B7,K1:K7))",
+        "ROWS(IF(TRUE,B1:B7,K1:K7))",
+    ] {
+        assert_sp_loud_refusal_both_hosts(f);
+    }
+}
+
+/// A walk that retries a lazy array-position expression (dense → used-row →
+/// used-col) must not report the same refusal three times: identical
+/// diagnostics collapse to one per cell.
+#[test]
+fn repeated_lazy_refusals_are_reported_once_per_cell() {
+    for f in [
+        "MATCH(10,B1:B7*2,0)",
+        "SUMIF(B1:B7*1,\">3\")",
+        "COUNTIF(B1:B7*1,\">3\")",
+    ] {
+        let mut cells = Vec::new();
+        for i in 0..7u32 {
+            cells.push((i, 1, literal_cell(num(f64::from(i + 1)))));
+        }
+        cells.push((0, 3, formula_cell(f)));
+        let mut e = Engine::load(build(cells));
+        e.recalc();
+        let diags = e.diagnostics_for(s0(), 0, 3);
+        assert_eq!(diags.len(), 1, "{f}: {diags:?}");
+        assert_eq!(diags[0].kind, DiagnosticKind::UnsupportedConstruct);
+    }
+}
+
+/// A refusal that merely propagates an upstream `#UNSUPPORTED!` element through
+/// a materialized array is not attributed to the consuming function's array
+/// semantics: the only diagnostic stays at the source cell.
+#[test]
+fn propagated_refusal_element_is_not_attributed_to_the_consumer() {
+    let mut cells = Vec::new();
+    for i in 0..7u32 {
+        cells.push((i, 1, literal_cell(num(f64::from(i + 1)))));
+    }
+    // B4 becomes a refusal source (whole-column range in scalar context).
+    cells[3] = (3, 1, formula_cell("SUMPRODUCT(A:A*2)"));
+    cells.push((8, 3, formula_cell("SUMPRODUCT(B1:B7*2)")));
+    let mut e = Engine::load(build(cells));
+    e.recalc();
+    assert_eq!(
+        e.value(s0(), 8, 3),
+        Some(&Value::Error(ErrorKind::Unsupported))
+    );
+    assert!(
+        e.diagnostics_for(s0(), 8, 3).is_empty(),
+        "consumer must not be blamed: {:?}",
+        e.diagnostics_for(s0(), 8, 3)
+    );
+    assert!(
+        !e.diagnostics_for(s0(), 3, 1).is_empty(),
+        "source cell keeps its diagnostic"
+    );
+}
+
+/// Nested inside SUM the same array-position expressions still array-evaluate
+/// (the inherited array context): `SUM(INDEX(B1:B7*2,3))` = 6,
+/// `SUM(INDEX(B1:B7*2,0,1))` = 56, `SUM(MATCH(10,B1:B7*2,0))` = 5.
+#[test]
+fn nested_array_position_expressions_keep_array_evaluation() {
+    assert_sp_both_hosts("SUM(INDEX(B1:B7*2,3))", num(6.0));
+    assert_sp_both_hosts("SUM(INDEX(B1:B7*2,0,1))", num(56.0));
+    assert_sp_both_hosts("SUM(MATCH(10,B1:B7*2,0))", num(5.0));
+}
+
 /// Top-level behavior must stay byte-identical (Principle 2): a bare array
 /// reaching an operator OUTSIDE array context still refuses. `INDEX` returns a
 /// multi-cell array; `INDEX(A1:A5,0,1)+1` at top level is `#UNSUPPORTED!`

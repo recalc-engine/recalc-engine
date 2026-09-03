@@ -53,6 +53,15 @@
 //! run did **not** cover `XOR`; extrapolating its result to `XOR` would be a
 //! guess (a hard design rule). Range/array blank cells are handled per the MS
 //! page (ignored). See `docs/plans/2026-07-15-lane5-probe-needed.md` (L5-1).
+//!
+//! # Array-position arguments (M2 lane 6 follow-up, 2026-09-04)
+//! An argument in a range/array position is evaluated under the consumed-array
+//! gate (RFC-0011; `docs/plans/2026-07-14-consumed-array-eval-spec.md` §2).
+//! A materialized multi-cell array reaching this function is **refused** with a
+//! loud `#UNSUPPORTED!` plus an engine diagnostic (spec §4, born-refusing
+//! boundary): only the SUM/SUMPRODUCT consumers are oracle-pinned (OXP-201), and
+//! the legacy alternative — a silent, host-row-dependent implicit intersection —
+//! is a "never silently wrong" violation. Plain ranges are unchanged.
 
 use std::ops::ControlFlow;
 
@@ -71,7 +80,11 @@ pub(crate) fn eval(_ctx: &EvalContext, args: &mut dyn CallArgs) -> Value {
     for i in 0..args.count() {
         match args.shape(i) {
             ArgShape::Omitted | ArgShape::Scalar => {
-                let v = args.eval_scalar(i);
+                // Array position: evaluate under the array-context gate, so an operator
+                // expression over a range materializes (and the scalar coercion below
+                // refuses it loudly — unpinned for this function) instead of being
+                // implicit-intersected into a silent host-row-dependent value.
+                let v = args.eval_scalar_array_arg(i);
                 // A scalar Blank is REFUSED loudly (L5-1): whether it counts as
                 // FALSE or is excluded is unpinned for XOR (AND/OR's OXP-094
                 // does not cover it).

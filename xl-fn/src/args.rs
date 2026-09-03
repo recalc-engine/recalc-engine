@@ -644,10 +644,22 @@ pub(crate) fn eff_shape(args: &mut dyn CallArgs, index: usize) -> EffShape {
 /// (see `func_sumif`'s `genuine_error_in_tested_cell_still_excluded_unchanged`
 /// and the queued OXP), which this helper leaves untouched.
 pub(crate) fn scalar_literal_error(args: &mut dyn CallArgs, index: usize) -> Option<ErrorKind> {
-    if eff_shape(args, index) == EffShape::ScalarLiteral
-        && let Value::Error(k) = args.eval_scalar(index)
-    {
-        return Some(k);
+    // Evaluate under the array-context gate: the argument sits in a
+    // range/array position, so an operator expression over a range inside it
+    // (`SUMIF(B1:B7*1,">3")`) must materialize (and then be refused by the
+    // walk, loudly) rather than implicit-intersect to the host-row-dependent
+    // `#VALUE!`/value that scalar context produced.
+    if eff_shape(args, index) == EffShape::ScalarLiteral {
+        match args.eval_scalar_array_arg(index) {
+            Value::Error(k) => return Some(k),
+            // The gate materialized a multi-cell array (an operator, `IF`, or
+            // `CHOOSE` over ranges in a criteria/sum position). No walk consumes
+            // such an array for this function, so it must surface as a loud
+            // `#UNSUPPORTED!` here — never fall through to a scalar-context
+            // re-evaluation that would intersect it into a silent number.
+            Value::Array(a) if a.as_scalar().is_none() => return Some(ErrorKind::Unsupported),
+            _ => {}
+        }
     }
     None
 }

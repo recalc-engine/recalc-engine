@@ -677,6 +677,7 @@ fn eval_call(
         ));
         return Value::Error(ErrorKind::Unsupported);
     }
+    let before = diags.len();
     let mut call_args = EngineArgs {
         args,
         anchor,
@@ -687,8 +688,34 @@ fn eval_call(
         diags,
         array_arg_ctx,
         lex,
+        consumed_array_seen: false,
+        consumed_array_had_refusal: false,
     };
-    (spec.eval)(ctx, &mut call_args)
+    let v = (spec.eval)(ctx, &mut call_args);
+    let consumed_array_seen = call_args.consumed_array_seen;
+    let consumed_array_had_refusal = call_args.consumed_array_had_refusal;
+    // Born-refusing boundary diagnostic (M2 lane 6, spec §4): the function
+    // received a materialized multi-cell array in a scalar-shaped argument and
+    // answered `#UNSUPPORTED!` without a diagnostic of its own (`xl-fn` has no
+    // diagnostic channel; its scalar coercion refused the array). The value was
+    // already loud — this names the function in the fidelity report.
+    if consumed_array_seen
+        && !consumed_array_had_refusal
+        && matches!(v, Value::Error(ErrorKind::Unsupported))
+        && diags.len() == before
+    {
+        diags.push((
+            DiagnosticKind::UnsupportedConstruct,
+            format!(
+                "function {} received a materialized multi-cell array argument and \
+                 refused it: the array shape or element semantics involved are not \
+                 oracle-pinned for this call, so the result is #UNSUPPORTED! rather \
+                 than an implicit intersection or a guess",
+                name.canonical
+            ),
+        ));
+    }
+    v
 }
 
 // ===========================================================================
@@ -1294,6 +1321,29 @@ fn dim_arg(
     }
 }
 
+/// Attach a diagnostic to an array-context evaluation that came back
+/// `#UNSUPPORTED!` **without** one (`before` is the sink length when the
+/// evaluation started). The refusals the RFC-0011 gate produces by construction
+/// (spec §4) live in `xl-fn`, which has no diagnostic channel: a nested function
+/// whose scalar coercion met the materialized multi-cell array (function
+/// broadcasting over a range — `SUM(LEN(A1:A7))`, `SUMPRODUCT(LEFT(A1:A7,1))`),
+/// an aggregator other than SUM/SUMPRODUCT, or an unpinned broadcast shape in
+/// `ops::broadcast_binary`. The value was already loud; this makes the
+/// workbook-level fidelity report name it too.
+fn note_undiagnosed_array_ctx_refusal(v: &Value, before: usize, diags: &mut DiagnosticSink) {
+    if matches!(v, Value::Error(ErrorKind::Unsupported)) && diags.len() == before {
+        diags.push((
+            DiagnosticKind::UnsupportedConstruct,
+            "array-context argument refused (#UNSUPPORTED!): a construct not on the \
+             OXP-201 pinned list — a function receiving a materialized multi-cell \
+             array (function broadcasting over a range, e.g. LEN(range)), an \
+             aggregator other than SUM/SUMPRODUCT, or an unpinned broadcast shape \
+             (RFC-0011 / M2 lane 6)"
+                .to_string(),
+        ));
+    }
+}
+
 /// The engine's implementation of `xl-fn`'s [`CallArgs`]: it evaluates argument
 /// expressions lazily and streams ranges/arrays on demand.
 struct EngineArgs<'a, 'e> {
@@ -1318,6 +1368,112 @@ struct EngineArgs<'a, 'e> {
     /// forwarded into every `eval_expr` this `EngineArgs` performs so a function
     /// argument that references a bound parameter resolves it.
     lex: LexEnv<'a>,
+    /// Set once this call has received a **materialized multi-cell array** in a
+    /// scalar-shaped argument (a consumed range broadcast under the RFC-0011
+    /// array-context gate, or a function-produced array). Read by [`eval_call`]
+    /// after the function returns: a `#UNSUPPORTED!` result with no diagnostic
+    /// of its own is then the born-refusing boundary (spec §4 — the function's
+    /// element-wise/array semantics are unpinned, so its scalar coercion refused
+    /// the array), and `eval_call` names the function in a diagnostic.
+    consumed_array_seen: bool,
+    /// Set alongside `consumed_array_seen` when the materialized array already
+    /// carried a Recalc refusal element (`#UNSUPPORTED!` propagated from an
+    /// upstream cell): the function's own `#UNSUPPORTED!` is then propagation,
+    /// not a verdict on its array semantics, and must not be attributed to it.
+    consumed_array_had_refusal: bool,
+}
+
+impl EngineArgs<'_, '_> {
+    /// Record that this call received a materialized multi-cell array (see
+    /// [`EngineArgs::consumed_array_seen`]).
+    fn note_consumed_array(&mut self, v: &Value) {
+        if let Value::Array(a) = v
+            && a.as_scalar().is_none()
+        {
+            self.consumed_array_seen = true;
+            if a.iter()
+                .any(|el| matches!(el, Value::Error(ErrorKind::Unsupported)))
+            {
+                self.consumed_array_had_refusal = true;
+            }
+        }
+    }
+
+    /// Evaluate a **lazy sub-expression occupying an array position** — the
+    /// fall-through arm of the streaming walks (`for_each_cell`, `for_each_row`,
+    /// `for_each_used_row`/`_col`, `for_each_cell_tagged`).
+    ///
+    /// Inside an array-context aggregator argument (`self.array_arg_ctx`) the
+    /// expression evaluates under the inherited context exactly as before:
+    /// `SUM(INDEX(B1:B7*2,3))` materializes the range and INDEX walks the array.
+    ///
+    /// At **top level** an *operator* expression (`B1:B7*1`, `range>3`,
+    /// `range&"x"`, `--(range=x)`) in an array position used to be evaluated in
+    /// scalar context — a silent legacy implicit intersection (`LARGE(B1:B7*1,1)`
+    /// read B1 in-band and gave `#VALUE!` off-band; Excel array-evaluates the
+    /// argument). Only the SUM/SUMPRODUCT consumers of such an array are
+    /// OXP-201-pinned, so here the expression is evaluated under the
+    /// array-context gate (the range materializes instead of intersecting) and
+    /// a resulting multi-cell array is refused LOUDLY — `#UNSUPPORTED!` plus a
+    /// diagnostic — rather than computed or intersected (Principle 2). A scalar
+    /// result (`A1*2`, `SUM(range)*2`) is returned as before. A non-operator root
+    /// (a nested call such as `MAP(...)`/`SEQUENCE(3)`, a literal) keeps the
+    /// inherited context: the walks already consume its function-produced array
+    /// (OXP-207 `INDEX(MAP(...),2)` = 20) and must not start refusing.
+    fn eval_lazy_array_position(&mut self, e: &Expr) -> Value {
+        // Operator roots, plus the two reference pass-through calls (`IF`,
+        // `CHOOSE`): at top level in a plain cell they intersect their range
+        // branch positionally, so `INDEX(IF(TRUE,B1:B7,K1:K7),3)` would read one
+        // cell silently. Excel passes the reference through; that is unpinned
+        // here, so the branch materializes under the gate and refuses loudly.
+        let operator_root = match &e.kind {
+            ExprKind::Unary { .. } | ExprKind::Binary { .. } | ExprKind::Postfix { .. } => true,
+            ExprKind::Call { name, .. } => matches!(name.canonical.as_str(), "IF" | "CHOOSE"),
+            _ => false,
+        };
+        if self.array_arg_ctx || !operator_root {
+            let v = eval_expr(
+                e,
+                self.anchor,
+                self.cur,
+                self.values,
+                self.env,
+                self.ctx,
+                self.diags,
+                self.array_arg_ctx,
+                self.lex,
+            );
+            self.note_consumed_array(&v);
+            return v;
+        }
+        let before = self.diags.len();
+        let v = eval_expr(
+            e,
+            self.anchor,
+            self.cur,
+            self.values,
+            self.env,
+            self.ctx,
+            self.diags,
+            true,
+            self.lex,
+        );
+        if let Value::Array(a) = &v
+            && a.as_scalar().is_none()
+        {
+            self.diags.push((
+                DiagnosticKind::UnsupportedConstruct,
+                "operator, IF, or CHOOSE expression over a multi-cell range in an \
+                 array-position argument at top level: Excel array-evaluates it (or \
+                 passes the reference through), but only the SUM/SUMPRODUCT consumers \
+                 are oracle-pinned (OXP-201) — refused rather than implicit-intersected"
+                    .to_string(),
+            ));
+            return Value::Error(ErrorKind::Unsupported);
+        }
+        note_undiagnosed_array_ctx_refusal(&v, before, self.diags);
+        v
+    }
 }
 
 impl CallArgs for EngineArgs<'_, '_> {
@@ -1353,20 +1509,22 @@ impl CallArgs for EngineArgs<'_, '_> {
     }
 
     fn eval_scalar(&mut self, index: usize) -> Value {
-        match self.args.get(index) {
-            Some(e) => eval_expr(
-                e,
-                self.anchor,
-                self.cur,
-                self.values,
-                self.env,
-                self.ctx,
-                self.diags,
-                self.array_arg_ctx,
-                self.lex,
-            ),
-            None => Value::Blank,
-        }
+        let Some(e) = self.args.get(index) else {
+            return Value::Blank;
+        };
+        let v = eval_expr(
+            e,
+            self.anchor,
+            self.cur,
+            self.values,
+            self.env,
+            self.ctx,
+            self.diags,
+            self.array_arg_ctx,
+            self.lex,
+        );
+        self.note_consumed_array(&v);
+        v
     }
 
     /// RFC-0011 + M2 lane-6 amendment: evaluate argument `index` in **array
@@ -1377,20 +1535,24 @@ impl CallArgs for EngineArgs<'_, '_> {
     /// the array-sum), while unbounded/over-cap ranges and unpinned shapes return
     /// loud `#UNSUPPORTED!` (never a silently-wrong implicit intersection).
     fn eval_scalar_array_arg(&mut self, index: usize) -> Value {
-        match self.args.get(index) {
-            Some(e) => eval_expr(
-                e,
-                self.anchor,
-                self.cur,
-                self.values,
-                self.env,
-                self.ctx,
-                self.diags,
-                true,
-                self.lex,
-            ),
-            None => Value::Blank,
-        }
+        let Some(e) = self.args.get(index) else {
+            return Value::Blank;
+        };
+        let before = self.diags.len();
+        let v = eval_expr(
+            e,
+            self.anchor,
+            self.cur,
+            self.values,
+            self.env,
+            self.ctx,
+            self.diags,
+            true,
+            self.lex,
+        );
+        self.note_consumed_array(&v);
+        note_undiagnosed_array_ctx_refusal(&v, before, self.diags);
+        v
     }
 
     // M2 lane 6: surface the RFC-0011 array-context flag (read-only) so nested
@@ -1472,17 +1634,7 @@ impl CallArgs for EngineArgs<'_, '_> {
             // e.g. `MAP(...)` — M2 lane 2) streams cell-by-cell, so an aggregator
             // consumes it exactly like a range.
             _ => {
-                let v = eval_expr(
-                    e,
-                    self.anchor,
-                    self.cur,
-                    self.values,
-                    self.env,
-                    self.ctx,
-                    self.diags,
-                    self.array_arg_ctx,
-                    self.lex,
-                );
+                let v = self.eval_lazy_array_position(e);
                 if let Value::Array(a) = &v {
                     for cell in a.iter() {
                         if visit(cell).is_break() {
@@ -1606,17 +1758,14 @@ impl CallArgs for EngineArgs<'_, '_> {
             // (e.g. `INDEX(MAP(...),k)` — M2 lane 2) is walked as the rectangle
             // it is, row by row; any other value is a 1×1 rectangle.
             _ => {
-                let v = eval_expr(
-                    e,
-                    self.anchor,
-                    self.cur,
-                    self.values,
-                    self.env,
-                    self.ctx,
-                    self.diags,
-                    self.array_arg_ctx,
-                    self.lex,
-                );
+                let v = self.eval_lazy_array_position(e);
+                // A Recalc refusal sentinel from the lazy evaluation is a refused
+                // rectangle, not a 1×1 cell holding an error: surface it as the
+                // walk's own `Err` so the consumer stays loud (`INDEX(B1:B7*2,3)`
+                // would otherwise read a 1-row rectangle and answer `#REF!`).
+                if matches!(v, Value::Error(ErrorKind::Unsupported)) {
+                    return Err(ErrorKind::Unsupported);
+                }
                 if let Value::Array(a) = &v {
                     let (r, c) = (a.rows(), a.cols());
                     let mut buf: Vec<Value> = Vec::with_capacity(c);
@@ -1708,17 +1857,11 @@ impl CallArgs for EngineArgs<'_, '_> {
                 Ok(())
             }
             _ => {
-                let v = eval_expr(
-                    e,
-                    self.anchor,
-                    self.cur,
-                    self.values,
-                    self.env,
-                    self.ctx,
-                    self.diags,
-                    self.array_arg_ctx,
-                    self.lex,
-                );
+                let v = self.eval_lazy_array_position(e);
+                // A refusal sentinel is a refused rectangle (see `for_each_row`).
+                if matches!(v, Value::Error(ErrorKind::Unsupported)) {
+                    return Err(ErrorKind::Unsupported);
+                }
                 let _ = visit(0, std::slice::from_ref(&v));
                 Ok(())
             }
@@ -1804,17 +1947,11 @@ impl CallArgs for EngineArgs<'_, '_> {
                 Ok(())
             }
             _ => {
-                let v = eval_expr(
-                    e,
-                    self.anchor,
-                    self.cur,
-                    self.values,
-                    self.env,
-                    self.ctx,
-                    self.diags,
-                    self.array_arg_ctx,
-                    self.lex,
-                );
+                let v = self.eval_lazy_array_position(e);
+                // A refusal sentinel is a refused rectangle (see `for_each_row`).
+                if matches!(v, Value::Error(ErrorKind::Unsupported)) {
+                    return Err(ErrorKind::Unsupported);
+                }
                 let _ = visit(0, std::slice::from_ref(&v));
                 Ok(())
             }
@@ -1924,17 +2061,7 @@ impl CallArgs for EngineArgs<'_, '_> {
             // serve them with default (all-false) flags, mirroring
             // `for_each_cell`'s scalar arm.
             _ => {
-                let v = eval_expr(
-                    e,
-                    self.anchor,
-                    self.cur,
-                    self.values,
-                    self.env,
-                    self.ctx,
-                    self.diags,
-                    self.array_arg_ctx,
-                    self.lex,
-                );
+                let v = self.eval_lazy_array_position(e);
                 let _ = visit(&v, CellFlags::default());
                 Ok(())
             }
@@ -2785,6 +2912,8 @@ mod tests {
             diags: &mut diags,
             array_arg_ctx: false,
             lex: None,
+            consumed_array_seen: false,
+            consumed_array_had_refusal: false,
         };
         f(&mut ea)
     }
@@ -2826,6 +2955,8 @@ mod tests {
             diags: &mut diags,
             array_arg_ctx: false,
             lex: None,
+            consumed_array_seen: false,
+            consumed_array_had_refusal: false,
         };
         f(&mut ea)
     }
@@ -3321,6 +3452,8 @@ mod tests {
             diags: &mut diags,
             array_arg_ctx: false,
             lex: None,
+            consumed_array_seen: false,
+            consumed_array_had_refusal: false,
         };
         f(&mut ea)
     }

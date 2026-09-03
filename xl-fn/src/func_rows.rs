@@ -57,8 +57,19 @@ pub(crate) fn eval(_ctx: &EvalContext, args: &mut dyn CallArgs) -> Value {
         return Value::number(f64::from(rect.height));
     }
     match args.shape(0) {
-        // A true scalar expression is a 1×1 array → 1 row.
-        ArgShape::Scalar => Value::number(1.0),
+        // A scalar-shaped expression: evaluate it under the array-context gate
+        // first (`eval_scalar_array_arg`, the SUM/SUMPRODUCT gate). An operator
+        // expression over a multi-cell range (`ROWS(B1:B7*1)`) or a
+        // function-produced array is a computed array whose row count is not
+        // oracle-pinned for this function — refuse loudly rather than report
+        // the silent 1 that scalar-context implicit intersection produced. A
+        // Recalc refusal sentinel from inside the argument propagates; any
+        // other value is a true scalar → a 1×1 array → 1 row (unchanged).
+        ArgShape::Scalar => match args.eval_scalar_array_arg(0) {
+            Value::Array(a) if a.as_scalar().is_none() => Value::Error(ErrorKind::Unsupported),
+            Value::Error(k) if k.is_recalc_sentinel() => Value::Error(k),
+            _ => Value::number(1.0),
+        },
         // A non-scalar with neither bounded dims nor a resolvable ref extent (a
         // 3-D span, an unresolvable name): no row count without guessing.
         ArgShape::Range | ArgShape::Array | ArgShape::Omitted => {

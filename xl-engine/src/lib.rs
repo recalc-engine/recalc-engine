@@ -1095,14 +1095,21 @@ impl Engine {
         // BEFORE `write_cell_result` so a spill diagnostic (`#SPILL!`, OXP-203
         // `#VALUE!`) appends after the eval diagnostics for this cell.
         if !raw_diags.is_empty() {
-            let diags = raw_diags
-                .into_iter()
-                .map(|(kind, message)| Diagnostic {
+            // Identical (kind, message) pairs collapse to one: an argument walk
+            // that retries a lazy array-position expression (dense → used-row →
+            // used-col) re-emits the same refusal, and the fidelity report should
+            // name each distinct finding once per cell.
+            let mut diags: Vec<Diagnostic> = Vec::new();
+            for (kind, message) in raw_diags {
+                if diags.iter().any(|d| d.kind == kind && d.message == message) {
+                    continue;
+                }
+                diags.push(Diagnostic {
                     cell: cid,
                     kind,
                     message,
-                })
-                .collect();
+                });
+            }
             self.diagnostics.insert(cid, diags);
         }
 

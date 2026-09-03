@@ -36,6 +36,15 @@
 //! not any coerced representation — ISBLANK.md's Coercion section is
 //! explicit that this is categorically different from the
 //! arithmetic/aggregating `Scalar`/`RangeAggregate` coercion modes.
+//!
+//! # Array-position arguments (M2 lane 6 follow-up, 2026-09-04)
+//! An argument in a range/array position is evaluated under the consumed-array
+//! gate (RFC-0011; `docs/plans/2026-07-14-consumed-array-eval-spec.md` §2).
+//! A materialized multi-cell array reaching this function is **refused** with a
+//! loud `#UNSUPPORTED!` plus an engine diagnostic (spec §4, born-refusing
+//! boundary): only the SUM/SUMPRODUCT consumers are oracle-pinned (OXP-201), and
+//! the legacy alternative — a silent, host-row-dependent implicit intersection —
+//! is a "never silently wrong" violation. Plain ranges are unchanged.
 
 use xl_value::{Array, ErrorKind, Value};
 
@@ -60,6 +69,12 @@ pub(crate) fn eval(_ctx: &EvalContext, args: &mut dyn CallArgs) -> Value {
         && a.as_scalar().is_none()
     {
         return map_isblank(a);
+    }
+    // Any other `Value::Array` — a function-produced array outside array
+    // context, or a 1×1 computed array — has no pinned ISBLANK rule: refuse
+    // loudly rather than answer FALSE for the array as a whole.
+    if matches!(v, Value::Array(_)) {
+        return Value::Error(ErrorKind::Unsupported);
     }
     if let Value::Error(kind) = &v
         && kind.is_recalc_sentinel()
