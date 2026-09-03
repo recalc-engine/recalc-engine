@@ -48,6 +48,15 @@
 //!   constant surviving array has `s == 0`, so `sqrt(Sxx·Syy)` is `0`; the
 //!   degenerate single-surviving-point case (`n == 1`) lands here too, and so
 //!   does an operand left empty after pairwise deletion.
+//!
+//! # Array-position arguments (M2 lane 6 follow-up, 2026-09-04)
+//! An argument in a range/array position is evaluated under the consumed-array
+//! gate (RFC-0011; `docs/plans/2026-07-14-consumed-array-eval-spec.md` §2).
+//! A materialized multi-cell array reaching this function is **refused** with a
+//! loud `#UNSUPPORTED!` plus an engine diagnostic (spec §4, born-refusing
+//! boundary): only the SUM/SUMPRODUCT consumers are oracle-pinned (OXP-201), and
+//! the legacy alternative — a silent, host-row-dependent implicit intersection —
+//! is a "never silently wrong" violation. Plain ranges are unchanged.
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
@@ -189,7 +198,14 @@ fn collect(args: &mut dyn CallArgs, index: usize) -> Result<Operand, ErrorKind> 
             Ok(Operand::Dense(cells))
         }
         None => match args.shape(index) {
-            ArgShape::Scalar => Ok(Operand::Dense(vec![args.eval_scalar(index)])),
+            // Array position: evaluate under the array-context gate, so an
+            // operator expression over a range materializes; a multi-cell array
+            // is not a scalar operand (unpinned for CORREL) → refuse loudly
+            // rather than implicit-intersect it.
+            ArgShape::Scalar => match args.eval_scalar_array_arg(index) {
+                Value::Array(a) if a.as_scalar().is_none() => Err(ErrorKind::Unsupported),
+                v => Ok(Operand::Dense(vec![v])),
+            },
             // Unbounded whole-column → used-extent walk (OXP-146); whole-row /
             // unresolvable ranges refuse and become #UNSUPPORTED!.
             _ => {

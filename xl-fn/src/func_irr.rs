@@ -82,6 +82,15 @@
 //!   [`STEP_TOLERANCE`] and without the final iterate passing the scale-invariant
 //!   normalized-residual check [`RESIDUAL_TOLERANCE`]), the result is `#NUM!`
 //!   (IRR.md §Non-convergence).
+//!
+//! # Array-position arguments (M2 lane 6 follow-up, 2026-09-04)
+//! An argument in a range/array position is evaluated under the consumed-array
+//! gate (RFC-0011; `docs/plans/2026-07-14-consumed-array-eval-spec.md` §2).
+//! A materialized multi-cell array reaching this function is **refused** with a
+//! loud `#UNSUPPORTED!` plus an engine diagnostic (spec §4, born-refusing
+//! boundary): only the SUM/SUMPRODUCT consumers are oracle-pinned (OXP-201), and
+//! the legacy alternative — a silent, host-row-dependent implicit intersection —
+//! is a "never silently wrong" violation. Plain ranges are unchanged.
 
 use std::ops::ControlFlow;
 
@@ -157,17 +166,22 @@ pub(crate) fn eval(_ctx: &EvalContext, args: &mut dyn CallArgs) -> Value {
     match args.shape(0) {
         // No `values` at all → no cash flows → #NUM! via the sign-change check.
         ArgShape::Omitted => {}
-        ArgShape::Scalar => match coerce_number_arg(&args.eval_scalar(0), CoercionMode::Scalar) {
-            NumericArg::Number(n) => flows.push(n),
-            NumericArg::Skip => {}
-            // OXP (unassigned): a direct single-cell / 1×1-range `values` error
-            // keeps its own kind here, UNPINNED — OXP-192/194 mapped errors to
-            // `#VALUE!` only for multi-cell ranges. A lone `values` can never
-            // satisfy the sign-change requirement anyway (→ `#NUM!`), so this is
-            // a degenerate corner; probe `=IRR(A1)` with A1=`#N/A` before
-            // aligning it with the range rule.
-            NumericArg::Error(k) => return Value::Error(k),
-        },
+        // Array position: evaluate under the array-context gate, so an operator
+        // expression over a range materializes (and the scalar coercion refuses
+        // it loudly — unpinned for IRR) instead of being implicit-intersected.
+        ArgShape::Scalar => {
+            match coerce_number_arg(&args.eval_scalar_array_arg(0), CoercionMode::Scalar) {
+                NumericArg::Number(n) => flows.push(n),
+                NumericArg::Skip => {}
+                // OXP (unassigned): a direct single-cell / 1×1-range `values` error
+                // keeps its own kind here, UNPINNED — OXP-192/194 mapped errors to
+                // `#VALUE!` only for multi-cell ranges. A lone `values` can never
+                // satisfy the sign-change requirement anyway (→ `#NUM!`), so this is
+                // a degenerate corner; probe `=IRR(A1)` with A1=`#N/A` before
+                // aligning it with the range rule.
+                NumericArg::Error(k) => return Value::Error(k),
+            }
+        }
         ArgShape::Range | ArgShape::Array => {
             let mut range_err: Option<ErrorKind> = None;
             let flows_ref = &mut flows;

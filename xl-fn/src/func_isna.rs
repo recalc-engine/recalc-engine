@@ -41,6 +41,15 @@
 //! and the sentinel-propagation contract is a Recalc-internal decision
 //! governed directly by Principle 2, not something an Excel probe could
 //! confirm or refute.
+//!
+//! # Array-position arguments (M2 lane 6 follow-up, 2026-09-04)
+//! An argument in a range/array position is evaluated under the consumed-array
+//! gate (RFC-0011; `docs/plans/2026-07-14-consumed-array-eval-spec.md` §2).
+//! A materialized multi-cell array reaching this function is **refused** with a
+//! loud `#UNSUPPORTED!` plus an engine diagnostic (spec §4, born-refusing
+//! boundary): only the SUM/SUMPRODUCT consumers are oracle-pinned (OXP-201), and
+//! the legacy alternative — a silent, host-row-dependent implicit intersection —
+//! is a "never silently wrong" violation. Plain ranges are unchanged.
 
 use xl_value::{ErrorKind, Value};
 
@@ -51,6 +60,14 @@ use crate::context::EvalContext;
 /// their provenance.
 pub(crate) fn eval(_ctx: &EvalContext, args: &mut dyn CallArgs) -> Value {
     let v = args.eval_scalar(0);
+    // A `Value::Array` reaching a variant test — a consumed range materialized
+    // under the RFC-0011 array-context gate (`SUM(ISNUMBER(range)*1)`) or a
+    // function-produced array — has no oracle-pinned element-wise semantics
+    // here. Refuse loudly rather than answer FALSE for the array as a whole,
+    // which fed a silent 0 into the enclosing aggregator (Principle 2).
+    if matches!(v, Value::Array(_)) {
+        return Value::Error(ErrorKind::Unsupported);
+    }
     if let Value::Error(kind) = &v
         && kind.is_recalc_sentinel()
     {
@@ -62,7 +79,7 @@ pub(crate) fn eval(_ctx: &EvalContext, args: &mut dyn CallArgs) -> Value {
 #[cfg(test)]
 mod tests {
     use crate::test_support::{TestArg::*, eval_direct, num, txt};
-    use xl_value::{ErrorKind, Value};
+    use xl_value::{Array, ErrorKind, Value};
 
     // TRUE only for #N/A.
     #[test]
@@ -113,5 +130,16 @@ mod tests {
                 "{kind:?} should propagate unchanged, not report FALSE"
             );
         }
+    }
+    // A materialized multi-cell array (array-context gate) or a 1×1 computed
+    // array has no pinned element-wise IS* rule: loud `#UNSUPPORTED!`, never a
+    // silent FALSE.
+    #[test]
+    fn array_operand_refuses_loudly() {
+        let arr = Value::Array(Array::new(2, 1, vec![num(1.0), txt("a")]).unwrap());
+        assert_eq!(
+            eval_direct(super::eval, vec![Scalar(arr)]),
+            Value::Error(ErrorKind::Unsupported)
+        );
     }
 }

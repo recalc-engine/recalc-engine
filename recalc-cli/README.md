@@ -16,7 +16,7 @@ verify it, and unpack it. No runtime, no Rust toolchain, no installer.
 
 ```sh
 # example: Linux x86_64 (see the release page for the other targets)
-V=0.1.0
+V=0.1.1
 curl -LO https://github.com/recalc-engine/recalc-engine/releases/download/cli-v$V/recalc-v$V-x86_64-unknown-linux-musl.tar.gz
 curl -LO https://github.com/recalc-engine/recalc-engine/releases/download/cli-v$V/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS

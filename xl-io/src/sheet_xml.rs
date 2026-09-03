@@ -386,6 +386,13 @@ fn resolve_value(
     let Some(text) = v_text else {
         return Ok(Value::Blank);
     };
+    // An empty `<v/>` (openpyxl writes one for every formula cell it saves, and
+    // Excel itself writes `<v></v>` for an empty-string result) carries no
+    // cached number: treat it exactly like an absent `<v>` so the workbook
+    // loads and the cell reports "no stored value" instead of a load error.
+    if text.trim().is_empty() && matches!(cell_type, Some("n") | None) {
+        return Ok(Value::Blank);
+    }
     match cell_type {
         Some("s") => {
             let index: usize = text.parse().map_err(|_| {

@@ -53,6 +53,15 @@
 //! Every other scalar shape (number, bool, `"TRUE"`/`"FALSE"` text,
 //! non-coercible text, error) is fully supported, as is every range/array
 //! shape. (Shared with `OR` and `NOT` — see `docs/oracle-experiments.md`.)
+//!
+//! # Array-position arguments (M2 lane 6 follow-up, 2026-09-04)
+//! An argument in a range/array position is evaluated under the consumed-array
+//! gate (RFC-0011; `docs/plans/2026-07-14-consumed-array-eval-spec.md` §2).
+//! A materialized multi-cell array reaching this function is **refused** with a
+//! loud `#UNSUPPORTED!` plus an engine diagnostic (spec §4, born-refusing
+//! boundary): only the SUM/SUMPRODUCT consumers are oracle-pinned (OXP-201), and
+//! the legacy alternative — a silent, host-row-dependent implicit intersection —
+//! is a "never silently wrong" violation. Plain ranges are unchanged.
 
 use std::ops::ControlFlow;
 
@@ -70,7 +79,11 @@ pub(crate) fn eval(_ctx: &EvalContext, args: &mut dyn CallArgs) -> Value {
     for i in 0..args.count() {
         match args.shape(i) {
             ArgShape::Omitted | ArgShape::Scalar => {
-                let v = args.eval_scalar(i);
+                // Array position: evaluate under the array-context gate, so an operator
+                // expression over a range materializes (and the scalar coercion below
+                // refuses it loudly — unpinned for this function) instead of being
+                // implicit-intersected into a silent host-row-dependent value.
+                let v = args.eval_scalar_array_arg(i);
                 // OXP-094 (RUN-2026-07-11-oracle01): a scalar Blank is excluded
                 // from the reduction, exactly like a range-blank cell — it
                 // contributes nothing and does not set `found`.

@@ -579,3 +579,32 @@ fn no_hidden_rows_leaves_the_set_empty() {
     assert!(!sheet.is_row_hidden(0));
     assert!(!sheet.is_row_hidden(1));
 }
+
+/// openpyxl saves every formula cell as `<f>…</f><v />`; Excel writes `<v></v>`
+/// for an empty-string result. Neither is a number, and neither may reject the
+/// workbook: the cell loads with its formula and no cached value.
+#[test]
+fn formula_cell_with_empty_cached_value_element_loads_as_no_cached_value() {
+    for inner in [
+        r#"<row r="1"><c r="A1"><f>1+2</f><v /></c></row>"#,
+        r#"<row r="1"><c r="A1"><f>1+2</f><v></v></c></row>"#,
+        r#"<row r="1"><c r="A1"><f>1+2</f><v>  </v></c></row>"#,
+    ] {
+        let bytes = support::minimal_xlsx(inner);
+        let wb = xl_io::from_bytes(&bytes).expect("empty <v> must not reject the workbook");
+        let cell = wb.sheets[0].cells.get(&(0, 0)).expect("A1 present");
+        assert_eq!(
+            cell.formula.as_ref().and_then(|f| f.text.as_deref()),
+            Some("1+2"),
+            "{inner}"
+        );
+        assert_eq!(cell.value, xl_value::Value::Blank, "{inner}");
+    }
+    // A literal (non-formula) numeric cell with an empty <v/> is likewise blank.
+    let bytes = support::minimal_xlsx(r#"<row r="1"><c r="A1"><v /></c></row>"#);
+    let wb = xl_io::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        wb.sheets[0].cells.get(&(0, 0)).map(|c| c.value.clone()),
+        Some(xl_value::Value::Blank)
+    );
+}

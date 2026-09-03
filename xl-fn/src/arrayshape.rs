@@ -143,7 +143,17 @@ pub(crate) fn materialize(args: &mut dyn CallArgs, index: usize) -> Materialized
             // unbounded whole-column/row range. Distinguish via `shape`.
             match args.shape(index) {
                 ArgShape::Scalar => {
-                    let v = args.eval_scalar(index);
+                    // Array position: evaluate under the array-context gate, so
+                    // an operator expression over a range materializes instead
+                    // of being implicit-intersected. A multi-cell array here is
+                    // not a 1×1 grid cell — its element-wise consumption by the
+                    // array-shaping functions is unpinned → refuse loudly.
+                    let v = args.eval_scalar_array_arg(index);
+                    if let Value::Array(a) = &v
+                        && a.as_scalar().is_none()
+                    {
+                        return Materialized::Refused(ErrorKind::Unsupported);
+                    }
                     // A lambda is engine-internal (RFC-0012 BC-6); refuse rather
                     // than relocate it (integration guard, the contract review lane-3a review).
                     if matches!(v, Value::Lambda(_)) {

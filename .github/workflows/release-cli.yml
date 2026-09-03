@@ -55,10 +55,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The binary reports the workspace crate version, so that is the
+          # The binary reports the recalc-cli crate version, so that is the
           # version of record. A release tag must name the same version.
-          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
-          test -n "$version" || { echo "ERROR: no workspace version in Cargo.toml"; exit 1; }
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' recalc-cli/Cargo.toml | head -n1)"
+          test -n "$version" || { echo "ERROR: no version in recalc-cli/Cargo.toml"; exit 1; }
           if [[ "$GITHUB_REF" == refs/tags/cli-v* ]]; then
             tag_version="${GITHUB_REF_NAME#cli-v}"
             if ! [[ "$tag_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
@@ -562,6 +562,14 @@ jobs:
           `examples/` directory with a demo workbook, a stale demo workbook and a policy file.
           EOF
           sed -e "s|@VERSION@|$VERSION|g" -e "s|@SHA@|$GITHUB_SHA|g" notes.template > notes.md
+          # Append this version's section of the CLI changelog, if present.
+          if [ -f recalc-cli/CHANGELOG.md ]; then
+            awk -v v="## $VERSION" '
+              $0 == v {on=1; print "## Changes"; next}
+              /^## / && on {exit}
+              on {print}
+            ' recalc-cli/CHANGELOG.md >> notes.md
+          fi
           cat notes.md
       # A hyphen in the version (e.g. 1.2.0-rc.1) marks a pre-release.
       - name: Create GitHub release

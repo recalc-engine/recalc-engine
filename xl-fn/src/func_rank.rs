@@ -54,6 +54,15 @@
 //! `numeric_gross`, `docs/oracle-run-status.md`) are **not** a compare-precision
 //! or coercion bug and remain an open, separate root-cause investigation
 //! (likely `ref`-shape / cascade — needs corpus mismatch mining, not this probe).
+//!
+//! # Array-position arguments (M2 lane 6 follow-up, 2026-09-04)
+//! An argument in a range/array position is evaluated under the consumed-array
+//! gate (RFC-0011; `docs/plans/2026-07-14-consumed-array-eval-spec.md` §2).
+//! A materialized multi-cell array reaching this function is **refused** with a
+//! loud `#UNSUPPORTED!` plus an engine diagnostic (spec §4, born-refusing
+//! boundary): only the SUM/SUMPRODUCT consumers are oracle-pinned (OXP-201), and
+//! the legacy alternative — a silent, host-row-dependent implicit intersection —
+//! is a "never silently wrong" violation. Plain ranges are unchanged.
 
 use std::ops::ControlFlow;
 
@@ -70,7 +79,11 @@ fn collect_ref_numbers(args: &mut dyn CallArgs) -> Result<Vec<f64>, ErrorKind> {
     let mut xs: Vec<f64> = Vec::new();
     match args.shape(1) {
         ArgShape::Omitted | ArgShape::Scalar => {
-            match coerce_number_arg(&args.eval_scalar(1), CoercionMode::Scalar) {
+            // Array position: evaluate under the array-context gate, so an operator
+            // expression over a range materializes (and the scalar coercion below
+            // refuses it loudly — unpinned for this function) instead of being
+            // implicit-intersected into a silent host-row-dependent value.
+            match coerce_number_arg(&args.eval_scalar_array_arg(1), CoercionMode::Scalar) {
                 NumericArg::Number(n) => xs.push(n),
                 NumericArg::Skip => {}
                 NumericArg::Error(k) => return Err(k),
